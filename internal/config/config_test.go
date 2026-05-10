@@ -353,7 +353,7 @@ func TestBrowserCmd_Auto_Firefox(t *testing.T) {
 func TestBrowserCmd_Auto_PrefersChromiumOverFirefox(t *testing.T) {
 	var buf bytes.Buffer
 	lp := fakeLookPath(map[string]string{
-		"firefox": "/usr/bin/firefox",
+		"firefox":  "/usr/bin/firefox",
 		"chromium": "/usr/bin/chromium",
 	})
 	got := BrowserCmd(nil, "https://x", lp, "linux", &buf)
