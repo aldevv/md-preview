@@ -2,7 +2,7 @@
 
 [![Latest release](https://img.shields.io/github/v/release/aldevv/md-preview)](https://github.com/aldevv/md-preview/releases)
 
-Preview any `.md` file in a real browser tab — single static binary, no Python, no pip, no venv. Pairs with [md-preview.nvim](https://github.com/aldevv/md-preview.nvim) for live scroll-sync (the editor cursor tracks the rendered page).
+Preview any `.md` file in a real browser tab — single static binary. Pairs with [md-preview.nvim](https://github.com/aldevv/md-preview.nvim) for live scroll-sync (the editor cursor tracks the rendered page).
 
 https://github.com/aldevv/md-preview/raw/main/docs/demo.mp4
 
