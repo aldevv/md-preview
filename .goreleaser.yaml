@@ -39,7 +39,7 @@ snapshot:
 release:
   github:
     owner: aldevv
-    name: md-preview.nvim
+    name: md-preview
 
 changelog:
   use: github
