@@ -49,6 +49,7 @@ mdp help
 ```sh
 mdp README.md                  # render + open in browser
 mdp                            # fzf-pick a .md from cwd, then preview
+mdp watch README.md            # auto-refresh when the file changes (any editor)
 mdp -e README.md               # preview AND open the file in nvim
 mdp -e                         # fzf-pick, preview, and edit
 mdp -t light README.md         # light theme
@@ -56,6 +57,11 @@ mdp -p README.md               # print HTML path, don't open browser
 mdp serve README.md 8080 dark  # plugin server mode (used by md-preview.nvim)
 mdp help                       # show help
 ```
+
+`mdp watch` keeps `mdp` running and the browser refreshes whenever the file
+is saved — editor-agnostic (works with VS Code, Sublime, vim, Helix, your
+`$EDITOR`, anything that writes to disk). Ctrl-C to stop; the preview tab
+closes with it (chrome `--app=` mode) or shows a "server stopped" notice.
 
 ### Keys
 
@@ -71,7 +77,9 @@ Enable Colemak with `colemak = true` in the [config](#config).
 
 ### Notes
 
-The preview is static — re-run `mdp` to refresh, or install the [Neovim plugin](#neovim-plugin) for live scroll-sync.
+The default preview is static — re-run `mdp` to refresh, use `mdp watch` for
+auto-refresh on save (any editor), or install the
+[Neovim plugin](#neovim-plugin) for live scroll-sync.
 
 YAML frontmatter is stripped.
 

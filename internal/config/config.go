@@ -216,11 +216,15 @@ func FzfPick(ctx context.Context, cwd string) (string, error) {
 		return "", errors.New("fzf not found on PATH")
 	}
 
+	// --hidden traverses dot-directories so notes kept under e.g. ~/.notes
+	// or repo .github/ trees show up. fd still honours .gitignore by
+	// default, which keeps node_modules and friends out of the picker.
+	// `find` traverses hidden directories by default, so no extra flag.
 	var findCmd *exec.Cmd
 	if p, err := exec.LookPath("fd"); err == nil {
-		findCmd = exec.CommandContext(ctx, p, "-e", "md", "-t", "f")
+		findCmd = exec.CommandContext(ctx, p, "--hidden", "-e", "md", "-t", "f")
 	} else if p, err := exec.LookPath("fdfind"); err == nil {
-		findCmd = exec.CommandContext(ctx, p, "-e", "md", "-t", "f")
+		findCmd = exec.CommandContext(ctx, p, "--hidden", "-e", "md", "-t", "f")
 	} else {
 		findCmd = exec.CommandContext(ctx, "find", ".", "-type", "f", "-name", "*.md")
 	}
