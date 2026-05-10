@@ -33,17 +33,14 @@ type Environment struct {
 	Stat     func(string) (os.FileInfo, error)
 	TempDir  func() string
 	Getwd    func() (string, error)
-	// FzfPick returns the user's pick (absolute or relative) or "" on
-	// cancellation. Returns an error if fzf itself is unavailable.
+	// FzfPick returns "" on cancellation; a non-nil error only when fzf
+	// itself is unavailable.
 	FzfPick func(ctx context.Context, cwd string) (string, error)
-	// LoadConfig returns the parsed config and a non-nil error only on
-	// parse failure (missing file is not an error).
+	// LoadConfig returns a non-nil error only on parse failure; missing
+	// file is not an error.
 	LoadConfig func() (config.Config, error)
-	// Spawn launches a detached browser process. Tests substitute a no-op.
-	Spawn func(argv []string) error
-	// Exec replaces the current process (used for nvim handoff). Tests
-	// substitute a recorder.
-	Exec func(path string, argv []string, env []string) error
+	Spawn      func(argv []string) error
+	Exec       func(path string, argv []string, env []string) error
 }
 
 func realEnv() Environment {
@@ -255,7 +252,7 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 	return 0
 }
 
-// tmpHTMLPath returns a stable temp HTML path so re-runs on the same source
+// tmpHTMLPath returns a stable path so re-runs on the same source
 // overwrite rather than accumulate.
 func tmpHTMLPath(tmpdir, src string) string {
 	sum := sha1.Sum([]byte(src))

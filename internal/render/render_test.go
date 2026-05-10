@@ -110,26 +110,19 @@ func TestRenderListItems_EachItemAnnotated(t *testing.T) {
 	}
 }
 
+// Raw HTML in markdown is intentionally NOT rendered — see render.go
+// (WithUnsafe). These tests guard the security boundary.
+
 func TestRenderHTMLBlock_RawHTMLOmitted(t *testing.T) {
-	// Raw HTML in markdown is intentionally NOT rendered: WithUnsafe is
-	// disabled so a malicious .md cannot inject <script> into the
-	// localhost-bound preview origin. Goldmark replaces HTML blocks with
-	// a "raw HTML omitted" comment.
 	src := "para\n\n<details>\n<summary>x</summary>\nhi\n</details>\n"
 	out := RenderBytes([]byte(src))
-	if strings.Contains(out, "<details>") {
-		t.Errorf("raw HTML should be omitted from output (WithUnsafe is off): %q", out)
-	}
-	if strings.Contains(out, "<summary>") {
-		t.Errorf("raw HTML inside block should be omitted: %q", out)
+	if strings.Contains(out, "<details>") || strings.Contains(out, "<summary>") {
+		t.Errorf("raw HTML should be omitted: %q", out)
 	}
 }
 
 func TestRenderHTMLBlock_ScriptDropped(t *testing.T) {
-	// Hard guarantee the security fix: no <script> tag from raw HTML
-	// can reach the rendered output.
-	src := "para\n\n<script>window.evil=1</script>\n"
-	out := RenderBytes([]byte(src))
+	out := RenderBytes([]byte("para\n\n<script>window.evil=1</script>\n"))
 	if strings.Contains(out, "<script") {
 		t.Errorf("script tag must be stripped: %q", out)
 	}

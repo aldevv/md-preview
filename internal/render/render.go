@@ -22,13 +22,15 @@ import (
 	"github.com/yuin/goldmark/util"
 )
 
-// dataLineAttr is the attribute name browsers use to scroll-sync to a source line.
 var dataLineAttr = []byte("data-line")
 
-// newMarkdown returns a goldmark instance configured with GFM. The
-// thematic-break and fenced-code parsers are wrapped to record the source
-// line on the AST node — goldmark's defaults don't populate Lines() for HRs,
-// and fenced code's Lines() skip the opening fence.
+// newMarkdown wraps the thematic-break and fenced-code parsers in a
+// lineRecorder because goldmark's defaults don't populate Lines() for HRs
+// and skip the opening fence on fenced code.
+//
+// WithUnsafe is intentionally NOT enabled: raw HTML in markdown would
+// execute as scripts in the localhost-bound preview origin, giving any
+// cloned README drive-by access to the local browser session.
 func newMarkdown() goldmark.Markdown {
 	return goldmark.New(
 		goldmark.WithExtensions(extension.GFM),
@@ -39,18 +41,14 @@ func newMarkdown() goldmark.Markdown {
 			),
 		),
 		goldmark.WithRendererOptions(
-			// WithUnsafe is intentionally NOT enabled: raw HTML in markdown
-			// would execute as scripts in the localhost-bound preview origin,
-			// giving any cloned README drive-by access to the local browser
-			// session and any other localhost-bound APIs.
 			renderer.WithNodeRenderers(util.Prioritized(newDataLineRenderer(), 100)),
 		),
 	)
 }
 
-// dataLineRenderer overrides goldmark's default HTML rendering for the
-// fenced and indented code blocks (whose default funcs ignore node
-// attributes) so we can stamp data-line on the generated <pre>.
+// dataLineRenderer overrides goldmark's default rendering for code blocks
+// (whose default funcs ignore node attributes) so we can stamp data-line
+// on the generated <pre>.
 type dataLineRenderer struct {
 	html.Config
 }
@@ -66,9 +64,8 @@ func (d *dataLineRenderer) SetOption(name renderer.OptionName, value any) {
 func (d *dataLineRenderer) RegisterFuncs(reg renderer.NodeRendererFuncRegisterer) {
 	reg.Register(ast.KindFencedCodeBlock, d.renderFencedCodeBlock)
 	reg.Register(ast.KindCodeBlock, d.renderCodeBlock)
-	// KindHTMLBlock is intentionally not registered: goldmark's default
-	// safe behavior (emit a "raw HTML omitted" comment) is what we want
-	// since WithUnsafe is off above.
+	// KindHTMLBlock deliberately not registered — goldmark's default with
+	// WithUnsafe off emits a "raw HTML omitted" comment, which is what we want.
 }
 
 func writeDataLineAttr(w util.BufWriter, n ast.Node) {

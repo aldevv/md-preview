@@ -23,21 +23,14 @@ import (
 )
 
 const (
-	// maxJSONBodyBytes caps POST bodies to prevent OOM from a hostile client.
 	maxJSONBodyBytes = 64 << 10
-	// wsWriteTimeout bounds how long broadcast() will wait on one client
-	// before dropping it, so a paused tab cannot stall scroll-sync for
-	// everyone behind it in the snapshot.
-	wsWriteTimeout = 2 * time.Second
+	wsWriteTimeout   = 2 * time.Second
 )
 
-// state holds the server's mutable shared state. All access is guarded
-// by mu; broadcast iterates over a snapshot of wsClients so a slow
-// client cannot block others.
 type state struct {
 	mu            sync.Mutex
 	file          string
-	fileDir       string // directory of the originally-served file; /render path-overrides must stay inside it
+	fileDir       string // /render path-overrides must stay inside it
 	htmlCache     string
 	renderVersion int
 	theme         string
@@ -61,8 +54,6 @@ func newState(file string, port int, theme string, colemak bool) *state {
 	}
 }
 
-// doRender re-renders the currently watched file, updates the cache and
-// version counter, and returns the new version.
 func (s *state) doRender() int {
 	s.mu.Lock()
 	fp := s.file
@@ -78,6 +69,20 @@ func (s *state) doRender() int {
 	return v
 }
 
+// renderAndBroadcast re-renders and pushes a reload to every WS client.
+// Used from both the HTTP /render handler and the stdin "render" command.
+func (s *state) renderAndBroadcast() int {
+	v := s.doRender()
+	payload, _ := json.Marshal(map[string]any{"type": "reload", "version": v})
+	s.broadcast(string(payload))
+	return v
+}
+
+func (s *state) broadcastScroll(line int) {
+	payload, _ := json.Marshal(map[string]any{"type": "scroll", "line": line})
+	s.broadcast(string(payload))
+}
+
 func (s *state) addClient(c net.Conn) {
 	s.mu.Lock()
 	s.wsClients[c] = struct{}{}
@@ -90,9 +95,9 @@ func (s *state) removeClient(c net.Conn) {
 	s.mu.Unlock()
 }
 
-// broadcast sends msg as a single text frame to every connected client.
-// A short write deadline is applied per client so one paused tab cannot
-// stall the loop; clients whose write fails or times out are dropped.
+// broadcast applies a per-client write deadline so one paused tab cannot
+// stall scroll-sync for everyone behind it; failed/timed-out clients are
+// dropped from the registry.
 func (s *state) broadcast(msg string) {
 	frame := wsEncode(msg)
 	s.mu.Lock()
@@ -119,7 +124,6 @@ func (s *state) broadcast(msg string) {
 	}
 }
 
-// loopbackHosts is the set of hostnames we treat as same-machine.
 var loopbackHosts = map[string]struct{}{
 	"localhost": {}, "127.0.0.1": {}, "::1": {}, "[::1]": {},
 }
@@ -127,10 +131,9 @@ var loopbackHosts = map[string]struct{}{
 // originAllowed enforces a loopback Host (defends against DNS rebinding —
 // a malicious page that resolves evil.com to 127.0.0.1 can't get a browser
 // to send our private API requests with Host: evil.com) and a loopback
-// Origin when present (defends against cross-tab CSRF). Port is
-// intentionally not checked so tests using httptest's random port still
-// work; the loopback bind in serve() guarantees only local processes can
-// reach us at all.
+// Origin when present (defends against cross-tab CSRF). Port is intentionally
+// not checked so tests on httptest's random port still pass; the loopback
+// bind in serve() guarantees only local processes can reach us at all.
 func originAllowed(r *http.Request) bool {
 	host := r.Host
 	if h, _, err := net.SplitHostPort(host); err == nil {
@@ -151,41 +154,39 @@ func originAllowed(r *http.Request) bool {
 	return true
 }
 
-// guardOrigin rejects any request that doesn't originate from a loopback
-// Host/Origin. Returns true if the request may proceed.
-func guardOrigin(w http.ResponseWriter, r *http.Request) bool {
-	if originAllowed(r) {
-		return true
+// guard wraps a handler with the loopback Origin/Host check and a method
+// check. Replaces five copies of the same boilerplate at handler entry.
+func guard(method string, fn http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !originAllowed(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		if r.Method != method {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		fn(w, r)
 	}
-	http.Error(w, "forbidden", http.StatusForbidden)
-	return false
 }
 
-// newHandler builds the HTTP handler tree for a state.
 func newHandler(s *state) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/", guard(http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
 			return
 		}
-		handleIndex(s, w, r)
-	})
-	mux.HandleFunc("/reload", func(w http.ResponseWriter, r *http.Request) { handleReload(s, w, r) })
-	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) { handleWS(s, w, r) })
-	mux.HandleFunc("/render", func(w http.ResponseWriter, r *http.Request) { handleRender(s, w, r) })
-	mux.HandleFunc("/scroll", func(w http.ResponseWriter, r *http.Request) { handleScroll(s, w, r) })
+		s.handleIndex(w, r)
+	}))
+	mux.HandleFunc("/reload", guard(http.MethodGet, s.handleReload))
+	mux.HandleFunc("/ws", guard(http.MethodGet, s.handleWS))
+	mux.HandleFunc("/render", guard(http.MethodPost, s.handleRender))
+	mux.HandleFunc("/scroll", guard(http.MethodPost, s.handleScroll))
 	return mux
 }
 
-func handleIndex(s *state, w http.ResponseWriter, r *http.Request) {
-	if !guardOrigin(w, r) {
-		return
-	}
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+func (s *state) handleIndex(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	body := s.htmlCache
 	theme := s.theme
@@ -201,14 +202,7 @@ func handleIndex(s *state, w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(encoded)
 }
 
-func handleReload(s *state, w http.ResponseWriter, r *http.Request) {
-	if !guardOrigin(w, r) {
-		return
-	}
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+func (s *state) handleReload(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	v := s.renderVersion
 	s.mu.Unlock()
@@ -218,24 +212,14 @@ func handleReload(s *state, w http.ResponseWriter, r *http.Request) {
 // pathInsideDir returns true if cleanPath resolves to a path inside dir
 // (or equals dir). Both arguments must be absolute and clean.
 func pathInsideDir(cleanPath, dir string) bool {
-	if cleanPath == dir {
-		return true
+	rel, err := filepath.Rel(dir, cleanPath)
+	if err != nil {
+		return false
 	}
-	sep := string(os.PathSeparator)
-	if !strings.HasSuffix(dir, sep) {
-		dir += sep
-	}
-	return strings.HasPrefix(cleanPath, dir)
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
-func handleRender(s *state, w http.ResponseWriter, r *http.Request) {
-	if !guardOrigin(w, r) {
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+func (s *state) handleRender(w http.ResponseWriter, r *http.Request) {
 	data, ok := readJSONBody(w, r)
 	if !ok {
 		return
@@ -257,38 +241,21 @@ func handleRender(s *state, w http.ResponseWriter, r *http.Request) {
 		s.file = abs
 		s.mu.Unlock()
 	}
-	v := s.doRender()
-	payload, _ := json.Marshal(map[string]any{"type": "reload", "version": v})
-	s.broadcast(string(payload))
+	v := s.renderAndBroadcast()
 	writeJSON(w, map[string]any{"ok": true, "version": v})
 }
 
-func handleScroll(s *state, w http.ResponseWriter, r *http.Request) {
-	if !guardOrigin(w, r) {
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+func (s *state) handleScroll(w http.ResponseWriter, r *http.Request) {
 	data, ok := readJSONBody(w, r)
 	if !ok {
 		return
 	}
 	line := jsonInt(data["line"])
-	payload, _ := json.Marshal(map[string]any{"type": "scroll", "line": line})
-	s.broadcast(string(payload))
+	s.broadcastScroll(line)
 	writeJSON(w, map[string]any{"ok": true, "line": line})
 }
 
-func handleWS(s *state, w http.ResponseWriter, r *http.Request) {
-	if !guardOrigin(w, r) {
-		return
-	}
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+func (s *state) handleWS(w http.ResponseWriter, r *http.Request) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "hijacking not supported", http.StatusInternalServerError)
@@ -328,12 +295,10 @@ func handleWS(s *state, w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// readJSONBody decodes the request body into a string-keyed map. Empty or
-// invalid bodies yield an empty map so a malformed POST still flows through
-// the handler instead of erroring out — keys are looked up defensively.
-// Bodies larger than maxJSONBodyBytes are rejected to bound memory.
-// The bool return is false (and a 413 response is written) when the cap
-// is exceeded; callers must not write further on false.
+// readJSONBody decodes the body into a string-keyed map. Empty/invalid
+// bodies yield an empty map so a malformed POST still flows through.
+// The bool return is false (and a 413 is written) when the cap is
+// exceeded; callers must not write further on false.
 func readJSONBody(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {
 	out := map[string]any{}
 	if r.Body == nil {
@@ -357,8 +322,6 @@ func readJSONBody(w http.ResponseWriter, r *http.Request) (map[string]any, bool)
 	return out, true
 }
 
-// jsonInt coerces a JSON-decoded value (typically float64) to int. Defaults
-// to 0 for missing or non-numeric inputs.
 func jsonInt(v any) int {
 	switch n := v.(type) {
 	case float64:
@@ -382,11 +345,10 @@ func writeJSON(w http.ResponseWriter, data any) {
 	_, _ = w.Write(encoded)
 }
 
-// readStdin consumes JSON commands from stdin one per line. Blank or
-// invalid lines are silently skipped. The quit callback is invoked on
-// {"type":"quit"} and the loop returns immediately. The "render" file
-// path is trusted (it comes from the local Neovim plugin over a private
-// pipe, not over HTTP) so no path restriction applies here.
+// readStdin consumes JSON commands from stdin one per line. The "render"
+// file path is trusted here (it comes from the local Neovim plugin over a
+// private pipe, not over HTTP) so the same path restriction as /render
+// does not apply.
 func readStdin(s *state, stdin io.Reader, quit func()) {
 	scanner := bufio.NewScanner(stdin)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -412,28 +374,20 @@ func readStdin(s *state, stdin io.Reader, quit func()) {
 					s.mu.Unlock()
 				}
 			}
-			v := s.doRender()
-			payload, _ := json.Marshal(map[string]any{"type": "reload", "version": v})
-			s.broadcast(string(payload))
+			s.renderAndBroadcast()
 		case "scroll":
-			line := jsonInt(msg["line"])
-			payload, _ := json.Marshal(map[string]any{"type": "scroll", "line": line})
-			s.broadcast(string(payload))
+			s.broadcastScroll(jsonInt(msg["line"]))
 		}
 	}
 }
 
 // serve runs the HTTP server and stdin reader concurrently. It returns
-// when the HTTP server stops (port-in-use error, ctx cancellation, etc.)
-// or when stdin closes/quits via the quit callback.
+// when the HTTP server stops or stdin closes/quits.
 //
-// quit is invoked from the stdin reader on {"type":"quit"}; production
-// wires this to os.Exit(0). Tests pass a no-op or signaling channel.
-//
-// Note: when stdin is os.Stdin (production) the scanner goroutine cannot
-// be cancelled — it exits when the process exits. ctx-cancellation paths
-// therefore leak this one goroutine; production calls os.Exit before that
-// matters, and tests pass bounded readers that EOF naturally.
+// When stdin is os.Stdin (production) the scanner goroutine cannot be
+// cancelled — it exits when the process exits. ctx-cancellation paths
+// therefore leak this one goroutine; production calls os.Exit before
+// that matters, and tests pass bounded readers that EOF naturally.
 func serve(ctx context.Context, s *state, stdin io.Reader, quit func()) error {
 	s.doRender()
 
@@ -478,14 +432,9 @@ func serve(ctx context.Context, s *state, stdin io.Reader, quit func()) error {
 	}
 }
 
-// Run starts the HTTP server on 127.0.0.1:port with the initial file and
-// theme, reads JSON commands from stdin, broadcasts reload/scroll
-// messages over WebSockets to connected browser clients, and blocks
-// until stdin closes or the process is interrupted. Returns the first
-// fatal error (e.g., port in use). On a {"type":"quit"} stdin command
-// the process exits with status 0.
-//
-// colemak swaps the in-page nav keys to n/e/i (for h/n/e/i layout).
+// Run starts the server, reads JSON commands from stdin, and blocks until
+// stdin closes or the process is interrupted. On {"type":"quit"} the
+// process exits with status 0.
 //
 // The startup line "[md-preview] Serving on http://localhost:<port>/" is
 // written to stdout so external tooling parsing it keeps working.
