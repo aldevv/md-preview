@@ -74,4 +74,4 @@ case ":${PATH-}:" in
        echo "       export PATH=\"$BIN:\$PATH\"" ;;
 esac
 
-echo "[mdp] done. Try: mdp --help"
+echo "[mdp] done. Try: mdp help"
