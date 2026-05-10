@@ -186,6 +186,50 @@ func TestRenderBlockquote(t *testing.T) {
 	}
 }
 
+func TestRenderGitHubAlert(t *testing.T) {
+	src := "> [!NOTE]\n> body text\n"
+	out := RenderBytes([]byte(src))
+	wants := []string{
+		`<div class="markdown-alert markdown-alert-note"`,
+		`<p class="markdown-alert-title">Note</p>`,
+		"body text",
+		`data-line="1"`,
+	}
+	for _, want := range wants {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in alert output: %q", want, out)
+		}
+	}
+	if strings.Contains(out, "[!NOTE]") {
+		t.Errorf("[!NOTE] header should be stripped: %q", out)
+	}
+	if strings.Contains(out, "<blockquote") {
+		t.Errorf("alert must not render as <blockquote>: %q", out)
+	}
+}
+
+func TestRenderGitHubAlert_AllKinds(t *testing.T) {
+	for _, kind := range []string{"note", "tip", "important", "warning", "caution"} {
+		src := "> [!" + strings.ToUpper(kind) + "]\n> body\n"
+		out := RenderBytes([]byte(src))
+		want := `markdown-alert-` + kind
+		if !strings.Contains(out, want) {
+			t.Errorf("kind %q: missing %q in output: %q", kind, want, out)
+		}
+	}
+}
+
+func TestRenderBlockquote_UnknownAlertType(t *testing.T) {
+	src := "> [!FOO]\n> body\n"
+	out := RenderBytes([]byte(src))
+	if !strings.Contains(out, "<blockquote") {
+		t.Errorf("unknown alert type should fall back to plain blockquote: %q", out)
+	}
+	if !strings.Contains(out, "[!FOO]") {
+		t.Errorf("unknown alert tag should remain in body: %q", out)
+	}
+}
+
 func samplePath(t *testing.T) string {
 	t.Helper()
 	wd, err := os.Getwd()

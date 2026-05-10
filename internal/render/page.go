@@ -15,6 +15,11 @@ const CSSDark = `
   --color-bg-code: #161b22;
   --color-link: #58a6ff;
   --color-heading-border: #21262d;
+  --color-alert-note: #1f6feb;
+  --color-alert-tip: #238636;
+  --color-alert-important: #8957e5;
+  --color-alert-warning: #d29922;
+  --color-alert-caution: #da3633;
 }
 `
 
@@ -28,6 +33,11 @@ const CSSLight = `
   --color-bg-code: #f6f8fa;
   --color-link: #0366d6;
   --color-heading-border: #eaecef;
+  --color-alert-note: #0969da;
+  --color-alert-tip: #1a7f37;
+  --color-alert-important: #8250df;
+  --color-alert-warning: #9a6700;
+  --color-alert-caution: #cf222e;
 }
 `
 
@@ -91,6 +101,29 @@ body {
 .markdown-body tr:nth-child(even) { background: var(--color-bg-code); }
 .markdown-body hr { border: none; border-top: 1px solid var(--color-border); margin: 1.5em 0; }
 .markdown-body img { max-width: 100%; }
+.markdown-body .markdown-alert {
+  border-left: 4px solid;
+  padding: 8px 16px;
+  margin-bottom: 1em;
+}
+.markdown-body .markdown-alert > p { margin-bottom: 0.5em; }
+.markdown-body .markdown-alert > p:last-child { margin-bottom: 0; }
+.markdown-body .markdown-alert-title {
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.85em;
+  letter-spacing: 0.05em;
+}
+.markdown-body .markdown-alert-note { border-color: var(--color-alert-note); }
+.markdown-body .markdown-alert-note .markdown-alert-title { color: var(--color-alert-note); }
+.markdown-body .markdown-alert-tip { border-color: var(--color-alert-tip); }
+.markdown-body .markdown-alert-tip .markdown-alert-title { color: var(--color-alert-tip); }
+.markdown-body .markdown-alert-important { border-color: var(--color-alert-important); }
+.markdown-body .markdown-alert-important .markdown-alert-title { color: var(--color-alert-important); }
+.markdown-body .markdown-alert-warning { border-color: var(--color-alert-warning); }
+.markdown-body .markdown-alert-warning .markdown-alert-title { color: var(--color-alert-warning); }
+.markdown-body .markdown-alert-caution { border-color: var(--color-alert-caution); }
+.markdown-body .markdown-alert-caution .markdown-alert-title { color: var(--color-alert-caution); }
 `
 
 // HLJSThemeDark is the highlight.js dark stylesheet URL.

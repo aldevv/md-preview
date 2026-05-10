@@ -33,7 +33,7 @@ var dataLineAttr = []byte("data-line")
 // cloned README drive-by access to the local browser session.
 func newMarkdown() goldmark.Markdown {
 	return goldmark.New(
-		goldmark.WithExtensions(extension.GFM),
+		goldmark.WithExtensions(extension.GFM, Alerts),
 		goldmark.WithParserOptions(
 			parser.WithBlockParsers(
 				util.Prioritized(&lineRecorder{inner: parser.NewThematicBreakParser()}, 100),
