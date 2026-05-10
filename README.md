@@ -4,7 +4,7 @@
 
 Preview any `.md` file in a real browser tab — single static binary. Pairs with [md-preview.nvim](https://github.com/aldevv/md-preview.nvim) for live scroll-sync (the editor cursor tracks the rendered page).
 
-https://github.com/aldevv/md-preview/raw/main/docs/demo.mp4
+<video src="https://github.com/aldevv/md-preview/raw/main/docs/demo.mp4" controls width="100%"></video>
 
 ## Install
 
