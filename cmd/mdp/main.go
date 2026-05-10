@@ -41,6 +41,9 @@ type Environment struct {
 	LoadConfig func() (config.Config, error)
 	Spawn      func(argv []string) error
 	Exec       func(path string, argv []string, env []string) error
+	// RunServer starts the preview server and blocks. Stubbed in tests so
+	// the -w/--watch path stays hermetic.
+	RunServer func(server.Options) error
 }
 
 func realEnv() Environment {
@@ -54,6 +57,7 @@ func realEnv() Environment {
 		LoadConfig: config.Load,
 		Spawn:      spawnDetached,
 		Exec:       syscall.Exec,
+		RunServer:  server.Run,
 	}
 }
 
@@ -77,8 +81,11 @@ Flags:
 
 Subcommands:
   mdp help                          Show this help
+  mdp watch [-t theme] [file]       Open the preview and auto-refresh when
+                                    the file changes (any editor). Stays
+                                    running until you Ctrl-C.
   mdp serve <file> <port> <theme>   Start the preview server (used by the
-                                    md-preview.nvim Neovim plugin)
+                                    md-preview.nvim Neovim plugin).
 `
 
 // run executes the CLI with the given args and IO. Returns the exit code.
@@ -93,6 +100,8 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 		switch args[0] {
 		case "serve":
 			return runServe(args[1:], stderr)
+		case "watch":
+			return runWatchSubcommand(args[1:], stdout, stderr, env)
 		case "help":
 			fmt.Fprint(stdout, usage)
 			return 0
@@ -289,6 +298,98 @@ func spawnDetached(argv []string) error {
 	return cmd.Start()
 }
 
+// runWatchSubcommand handles `mdp watch [-t theme] [file]`. Picks a file
+// (positional arg or fzf), validates theme, then runs the preview server
+// with the editor-agnostic file watcher enabled.
+func runWatchSubcommand(args []string, stdout, stderr io.Writer, env Environment) int {
+	fs := flag.NewFlagSet("mdp watch", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		fmt.Fprintln(stdout, "Usage: mdp watch [-t dark|light] [file]")
+	}
+	themeLong := fs.String("theme", "", "")
+	themeShort := fs.String("t", "", "")
+	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
+		return 1
+	}
+
+	theme := *themeLong
+	if theme == "" {
+		theme = *themeShort
+	}
+
+	cfg, err := env.LoadConfig()
+	if err != nil {
+		fmt.Fprintf(stderr, "mdp: config: %v\n", err)
+	}
+
+	file := ""
+	if fs.NArg() > 0 {
+		file = fs.Arg(0)
+	}
+	if file == "" {
+		cwd, err := env.Getwd()
+		if err != nil {
+			fmt.Fprintf(stderr, "mdp: %v\n", err)
+			return 1
+		}
+		pick, err := env.FzfPick(context.Background(), cwd)
+		if err != nil {
+			fmt.Fprintln(stderr, "mdp watch: pass a file or install fzf for the picker")
+			return 1
+		}
+		if pick == "" {
+			return 0
+		}
+		file = pick
+	}
+
+	src, err := filepath.Abs(file)
+	if err != nil {
+		fmt.Fprintf(stderr, "mdp: %v\n", err)
+		return 1
+	}
+	info, err := env.Stat(src)
+	if err != nil || info.IsDir() {
+		fmt.Fprintf(stderr, "mdp: file not found: %s\n", src)
+		return 1
+	}
+
+	if theme == "" {
+		theme = cfg.Theme
+	}
+	if theme == "" {
+		theme = "dark"
+	}
+	if theme != "dark" && theme != "light" {
+		fmt.Fprintf(stderr, "mdp: invalid theme %q, using 'dark'\n", theme)
+		theme = "dark"
+	}
+
+	opts := server.Options{
+		File:    src,
+		Port:    0, // kernel-assigned ephemeral port
+		Theme:   theme,
+		Colemak: cfg.Colemak,
+		Watch:   true,
+		OnListen: func(port int) {
+			url := fmt.Sprintf("http://localhost:%d/", port)
+			argv := config.BrowserCmd(cfg.Browser, url, env.LookPath, env.GOOS, stderr)
+			if err := env.Spawn(argv); err != nil {
+				fmt.Fprintf(stderr, "mdp: launching browser: %v\n", err)
+			}
+		},
+	}
+	if err := env.RunServer(opts); err != nil {
+		fmt.Fprintf(stderr, "mdp: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
 // runServe handles `mdp serve <file> <port> <theme>`. The Lua plugin spawns
 // this and communicates over JSON-on-stdin; see internal/server. Colemak
 // nav-key mode is opted in via MDP_COLEMAK=1 in the environment, with
@@ -310,7 +411,13 @@ func runServe(args []string, stderr io.Writer) int {
 	if v := os.Getenv("MDP_COLEMAK"); v == "1" || v == "true" {
 		colemak = true
 	}
-	if err := server.Run(args[0], port, args[2], colemak); err != nil {
+	opts := server.Options{
+		File:    args[0],
+		Port:    port,
+		Theme:   args[2],
+		Colemak: colemak,
+	}
+	if err := server.Run(opts); err != nil {
 		fmt.Fprintf(stderr, "mdp serve: %v\n", err)
 		return 1
 	}

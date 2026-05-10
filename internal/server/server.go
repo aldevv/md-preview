@@ -381,6 +381,19 @@ func readStdin(s *state, stdin io.Reader, quit func()) {
 	}
 }
 
+// Options configures Run. Watch enables the editor-agnostic file watcher
+// (mtime polling). OnListen, if non-nil, is invoked with the actual bound
+// port once net.Listen succeeds — useful when Port is 0 (ephemeral) and
+// the caller needs the address to open a browser.
+type Options struct {
+	File     string
+	Port     int
+	Theme    string
+	Colemak  bool
+	Watch    bool
+	OnListen func(port int)
+}
+
 // serve runs the HTTP server and stdin reader concurrently. It returns
 // when the HTTP server stops or stdin closes/quits.
 //
@@ -388,7 +401,7 @@ func readStdin(s *state, stdin io.Reader, quit func()) {
 // cancelled — it exits when the process exits. ctx-cancellation paths
 // therefore leak this one goroutine; production calls os.Exit before
 // that matters, and tests pass bounded readers that EOF naturally.
-func serve(ctx context.Context, s *state, stdin io.Reader, quit func()) error {
+func serve(ctx context.Context, s *state, stdin io.Reader, quit func(), watch bool, onListen func(int)) error {
 	s.doRender()
 
 	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
@@ -397,13 +410,29 @@ func serve(ctx context.Context, s *state, stdin io.Reader, quit func()) error {
 		return err
 	}
 
+	// Pick up the ephemeral port assigned by the kernel when Port==0 so
+	// the rendered page embeds the correct WS port.
+	actualPort := ln.Addr().(*net.TCPAddr).Port
+	s.mu.Lock()
+	s.port = actualPort
+	s.mu.Unlock()
+	if onListen != nil {
+		onListen(actualPort)
+	}
+
 	srv := &http.Server{
 		Handler:           newHandler(s),
 		ReadHeaderTimeout: 10 * time.Second,
 		ErrorLog:          log.New(io.Discard, "", 0),
 	}
 
-	fmt.Fprintf(os.Stdout, "[md-preview] Serving on http://localhost:%d/\n", s.port)
+	fmt.Fprintf(os.Stdout, "[md-preview] Serving on http://localhost:%d/\n", actualPort)
+
+	watchCtx, watchCancel := context.WithCancel(ctx)
+	defer watchCancel()
+	if watch {
+		go watchFile(watchCtx, s)
+	}
 
 	stdinDone := make(chan struct{})
 	go func() {
@@ -438,7 +467,7 @@ func serve(ctx context.Context, s *state, stdin io.Reader, quit func()) error {
 //
 // The startup line "[md-preview] Serving on http://localhost:<port>/" is
 // written to stdout so external tooling parsing it keeps working.
-func Run(file string, port int, theme string, colemak bool) error {
-	s := newState(file, port, theme, colemak)
-	return serve(context.Background(), s, os.Stdin, func() { os.Exit(0) })
+func Run(opts Options) error {
+	s := newState(opts.File, opts.Port, opts.Theme, opts.Colemak)
+	return serve(context.Background(), s, os.Stdin, func() { os.Exit(0) }, opts.Watch, opts.OnListen)
 }

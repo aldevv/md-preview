@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/aldevv/md-preview/internal/config"
+	"github.com/aldevv/md-preview/internal/server"
 )
 
 // testEnv returns an Environment safe for tests: no real fzf, no browser
@@ -26,6 +27,7 @@ func testEnv(t *testing.T) Environment {
 		LoadConfig: func() (config.Config, error) { return config.Config{}, nil },
 		Spawn:      func([]string) error { return nil },
 		Exec:       func(string, []string, []string) error { return nil },
+		RunServer:  func(server.Options) error { return nil },
 	}
 }
 
@@ -177,6 +179,90 @@ func TestRun_EditAndNoEdit_Conflict(t *testing.T) {
 	}
 	if !strings.Contains(errb.String(), "conflict") {
 		t.Fatalf("stderr = %q, want 'conflict'", errb.String())
+	}
+}
+
+func TestRun_WatchSubcommand_InvokesServer(t *testing.T) {
+	var out, errb bytes.Buffer
+	env := testEnv(t)
+	src := writeMD(t, "# hi\n")
+
+	var (
+		gotOpts   server.Options
+		serverHit bool
+	)
+	env.RunServer = func(opts server.Options) error {
+		serverHit = true
+		gotOpts = opts
+		// Simulate the kernel binding a port so the browser branch fires.
+		if opts.OnListen != nil {
+			opts.OnListen(45678)
+		}
+		return nil
+	}
+
+	var spawnedArgv []string
+	env.Spawn = func(argv []string) error {
+		spawnedArgv = argv
+		return nil
+	}
+	env.LookPath = func(name string) (string, error) {
+		if name == "xdg-open" {
+			return "/usr/bin/xdg-open", nil
+		}
+		return "", errors.New("not found")
+	}
+
+	code := run([]string{"watch", src}, nil, &out, &errb, env)
+	if code != 0 {
+		t.Fatalf("exit code = %d; stderr=%s", code, errb.String())
+	}
+	if !serverHit {
+		t.Fatal("RunServer was not called")
+	}
+	if !gotOpts.Watch {
+		t.Errorf("server.Options.Watch = false, want true")
+	}
+	if gotOpts.Port != 0 {
+		t.Errorf("server.Options.Port = %d, want 0 (ephemeral)", gotOpts.Port)
+	}
+	if gotOpts.File == "" || !strings.HasSuffix(gotOpts.File, "doc.md") {
+		t.Errorf("server.Options.File = %q, want absolute path ending in doc.md", gotOpts.File)
+	}
+	joined := strings.Join(spawnedArgv, " ")
+	if !strings.Contains(joined, "http://localhost:45678/") {
+		t.Errorf("browser argv = %v, want http://localhost:45678/", spawnedArgv)
+	}
+}
+
+func TestRun_WatchSubcommand_ThemeFlag(t *testing.T) {
+	var out, errb bytes.Buffer
+	env := testEnv(t)
+	src := writeMD(t, "# hi\n")
+	var gotOpts server.Options
+	env.RunServer = func(opts server.Options) error {
+		gotOpts = opts
+		return nil
+	}
+	code := run([]string{"watch", "-t", "light", src}, nil, &out, &errb, env)
+	if code != 0 {
+		t.Fatalf("exit code = %d; stderr=%s", code, errb.String())
+	}
+	if gotOpts.Theme != "light" {
+		t.Errorf("Theme = %q, want light", gotOpts.Theme)
+	}
+}
+
+func TestRun_WatchSubcommand_FileMissing(t *testing.T) {
+	var out, errb bytes.Buffer
+	env := testEnv(t)
+	missing := filepath.Join(t.TempDir(), "nope.md")
+	code := run([]string{"watch", missing}, nil, &out, &errb, env)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(errb.String(), "file not found") {
+		t.Fatalf("stderr = %q, want 'file not found'", errb.String())
 	}
 }
 
