@@ -222,7 +222,20 @@ ws.onmessage = (e) => {
         });
     }
 };
-ws.onclose = () => setTimeout(() => location.reload(), 1000);
+ws.onclose = () => {
+    // When the server exits (mdp watch Ctrl-C, or the nvim plugin shutting
+    // down) the WS closes. window.close() works for chrome --app= popups;
+    // for regular tabs (xdg-open / firefox --new-window) browsers block the
+    // call silently. We replace the body either way so it's obvious the
+    // preview is dead — the nvim plugin's xdotool/wmctrl fallback can still
+    // kill the tab from outside.
+    try { window.close(); } catch (_) {}
+    setTimeout(() => {
+        document.body.innerHTML =
+            '<p style="font-family:sans-serif;padding:2rem;opacity:0.5">' +
+            'md-preview server stopped — you can close this tab.</p>';
+    }, 50);
+};
 `
 
 // BuildPage wraps an HTML body in the full preview page template.
