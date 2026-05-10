@@ -126,11 +126,8 @@ body {
 .markdown-body .markdown-alert-caution .markdown-alert-title { color: var(--color-alert-caution); }
 `
 
-// HLJSThemeDark is the highlight.js dark stylesheet URL.
-const HLJSThemeDark = "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css"
-
-// HLJSThemeLight is the highlight.js light stylesheet URL.
-const HLJSThemeLight = "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css"
+// highlight.js theme CSS and the highlight.js bundle itself live in
+// assets.go (embedded via go:embed) and are inlined by BuildPage below.
 
 // vimKeysScriptTemplate implements hjkl + d/u + g/G + q (close window)
 // page navigation, ignoring keys while focus is in an editable element.
@@ -237,10 +234,10 @@ ws.onclose = () => setTimeout(() => location.reload(), 1000);
 // colemak swaps the in-page nav keys from j/k/l to n/e/i.
 func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool) string {
 	cssVars := CSSDark
-	hljsTheme := HLJSThemeDark
+	hljsThemeCSS := hljsThemeDarkCSS
 	if theme == "light" {
 		cssVars = CSSLight
-		hljsTheme = HLJSThemeLight
+		hljsThemeCSS = hljsThemeLightCSS
 	}
 
 	wsScript := ""
@@ -253,8 +250,8 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool) st
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="%s">
 <style>
+%s
 %s
 %s
 %s
@@ -264,12 +261,12 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool) st
 <div id="content" class="markdown-body">
 %s
 </div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script>
+%s
 hljs.highlightAll();
 %s
 %s
 </script>
 </body>
-</html>`, hljsTheme, cssVars, CSSCommon, extraCSS, body, vimKeys(colemak), wsScript)
+</html>`, hljsThemeCSS, cssVars, CSSCommon, extraCSS, body, hljsScript, vimKeys(colemak), wsScript)
 }

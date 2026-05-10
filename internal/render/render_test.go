@@ -278,7 +278,11 @@ func TestBuildPage_DarkTheme(t *testing.T) {
 	page := BuildPage("<p>x</p>", "dark", 0, "", false)
 	wants := []string{
 		"--color-bg-primary: #0d1117",
-		HLJSThemeDark,
+		// dark hljs theme: code background is #0d1117
+		"pre code.hljs",
+		"background:#0d1117",
+		// inline highlight.js, not a CDN link
+		"var hljs=function()",
 		"case 'j':",
 	}
 	for _, want := range wants {
@@ -286,18 +290,27 @@ func TestBuildPage_DarkTheme(t *testing.T) {
 			t.Errorf("page missing %q", want)
 		}
 	}
+	if strings.Contains(page, "cdnjs.cloudflare.com") {
+		t.Errorf("page must not reference cdnjs.cloudflare.com (assets are embedded)")
+	}
 }
 
 func TestBuildPage_LightTheme(t *testing.T) {
 	page := BuildPage("<p>x</p>", "light", 0, "", false)
 	wants := []string{
 		"--color-bg-primary: #ffffff",
-		HLJSThemeLight,
+		// light hljs theme: code background is #fff
+		"pre code.hljs",
+		"background:#fff",
+		"var hljs=function()",
 	}
 	for _, want := range wants {
 		if !strings.Contains(page, want) {
 			t.Errorf("page missing %q", want)
 		}
+	}
+	if strings.Contains(page, "cdnjs.cloudflare.com") {
+		t.Errorf("page must not reference cdnjs.cloudflare.com (assets are embedded)")
 	}
 }
 
