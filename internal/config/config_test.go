@@ -329,6 +329,40 @@ func TestBrowserCmd_Auto_Chromium(t *testing.T) {
 	}
 }
 
+func TestBrowserCmd_Auto_Brave(t *testing.T) {
+	var buf bytes.Buffer
+	lp := fakeLookPath(map[string]string{"brave-browser": "/usr/bin/brave-browser"})
+	got := BrowserCmd(nil, "https://x", lp, "linux", &buf)
+	want := []string{"/usr/bin/brave-browser", "--app=https://x"}
+	if !equalSlice(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestBrowserCmd_Auto_Firefox(t *testing.T) {
+	var buf bytes.Buffer
+	lp := fakeLookPath(map[string]string{"firefox": "/usr/bin/firefox"})
+	got := BrowserCmd(nil, "https://x", lp, "linux", &buf)
+	want := []string{"/usr/bin/firefox", "--new-window", "https://x"}
+	if !equalSlice(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// Chromium-family wins over Firefox when both are present.
+func TestBrowserCmd_Auto_PrefersChromiumOverFirefox(t *testing.T) {
+	var buf bytes.Buffer
+	lp := fakeLookPath(map[string]string{
+		"firefox": "/usr/bin/firefox",
+		"chromium": "/usr/bin/chromium",
+	})
+	got := BrowserCmd(nil, "https://x", lp, "linux", &buf)
+	want := []string{"/usr/bin/chromium", "--app=https://x"}
+	if !equalSlice(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
 func TestBrowserCmd_Auto_NoneFound_Linux(t *testing.T) {
 	var buf bytes.Buffer
 	lp := fakeLookPath(nil)

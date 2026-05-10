@@ -171,10 +171,36 @@ func BrowserCmd(browser any, url string, lookPath func(string) (string, error), 
 	}
 }
 
+// autoBrowserFamilies lists browsers we know how to launch with a useful flag,
+// in preference order. Chromium-family wins because --app= gives a chromeless
+// single-window UX; Firefox-family is a normal new window since there's no
+// equivalent app-mode that works without per-profile setup.
+var autoBrowserFamilies = []struct {
+	bins []string
+	args func(url string) []string
+}{
+	{
+		bins: []string{
+			"google-chrome", "google-chrome-stable",
+			"chromium", "chromium-browser",
+			"brave-browser", "brave",
+			"microsoft-edge", "microsoft-edge-stable",
+			"vivaldi", "vivaldi-stable",
+		},
+		args: func(url string) []string { return []string{"--app=" + url} },
+	},
+	{
+		bins: []string{"firefox", "firefox-esr", "librewolf", "waterfox"},
+		args: func(url string) []string { return []string{"--new-window", url} },
+	},
+}
+
 func autoBrowserCmd(url string, lookPath func(string) (string, error), goos string) []string {
-	for _, c := range []string{"google-chrome", "chromium", "chromium-browser"} {
-		if p, err := lookPath(c); err == nil && p != "" {
-			return []string{p, "--app=" + url}
+	for _, fam := range autoBrowserFamilies {
+		for _, name := range fam.bins {
+			if p, err := lookPath(name); err == nil && p != "" {
+				return append([]string{p}, fam.args(url)...)
+			}
 		}
 	}
 	if goos == "darwin" {
