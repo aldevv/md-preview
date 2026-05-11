@@ -97,7 +97,8 @@ Subcommands:
   mdp watch [-t theme] [file]       Open the preview and auto-refresh when
                                     the file changes (any editor). Stays
                                     running until you Ctrl-C.
-  mdp update [--check]              Update mdp to the latest GitHub release.
+  mdp update [--check] [--force]    Update mdp to the latest GitHub release.
+             [--version vX.Y.Z]     Pin a specific tag with --version.
                                     --check only reports whether one is
                                     available without installing.
   mdp skill path                    Print the path to the bundled skill
@@ -309,8 +310,18 @@ func writeTmpFile(path string, data []byte) error {
 	return err
 }
 
-// install.sh reads this to skip no-op reinstalls.
+// version is set at link time via `-ldflags "-X main.version=..."` for
+// release builds (goreleaser) and `make install`. For module-mode
+// `go install github.com/aldevv/md-preview/cmd/mdp@vX.Y.Z` invocations
+// it stays empty and buildVersion falls back to debug.ReadBuildInfo.
+var version string
+
+// install.sh reads this to skip no-op reinstalls. Update also compares
+// it against the latest release tag.
 func buildVersion() string {
+	if version != "" {
+		return version
+	}
 	info, ok := debug.ReadBuildInfo()
 	if !ok || info.Main.Version == "" {
 		return "(unknown)"

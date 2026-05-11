@@ -5,7 +5,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -428,7 +431,7 @@ func tarballWithMdp(t *testing.T, body []byte) []byte {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
-	hdr := &tar.Header{Name: "mdp", Mode: 0o755, Size: int64(len(body))}
+	hdr := &tar.Header{Name: "mdp", Mode: 0o755, Size: int64(len(body)), Typeflag: tar.TypeReg}
 	if err := tw.WriteHeader(hdr); err != nil {
 		t.Fatal(err)
 	}
@@ -444,8 +447,29 @@ func tarballWithMdp(t *testing.T, body []byte) []byte {
 	return buf.Bytes()
 }
 
+// checksumsFor builds a goreleaser-style checksums.txt body matching the
+// given (name -> bytes) entries.
+func checksumsFor(entries map[string][]byte) []byte {
+	var sb strings.Builder
+	for name, data := range entries {
+		sum := sha256.Sum256(data)
+		fmt.Fprintf(&sb, "%s  %s\n", hex.EncodeToString(sum[:]), name)
+	}
+	return []byte(sb.String())
+}
+
+// setVersion overrides the package-level `version` var for the duration
+// of a test so buildVersion() returns a deterministic, regex-valid tag.
+func setVersion(t *testing.T, v string) {
+	t.Helper()
+	old := version
+	version = v
+	t.Cleanup(func() { version = old })
+}
+
 func TestRun_UpdateCheck_ReportsAvailable(t *testing.T) {
 	var out, errb bytes.Buffer
+	setVersion(t, "v0.1.0")
 	env := testEnv(t)
 	env.HTTPGet = fakeGetter(t, map[string][]byte{
 		"releases/latest": []byte(`{"tag_name":"v9.9.9"}`),
@@ -461,22 +485,23 @@ func TestRun_UpdateCheck_ReportsAvailable(t *testing.T) {
 
 func TestRun_UpdateCheck_AlreadyAtLatest(t *testing.T) {
 	var out, errb bytes.Buffer
+	setVersion(t, "v9.9.9")
 	env := testEnv(t)
-	current := buildVersion()
 	env.HTTPGet = fakeGetter(t, map[string][]byte{
-		"releases/latest": []byte(`{"tag_name":"` + current + `"}`),
+		"releases/latest": []byte(`{"tag_name":"v9.9.9"}`),
 	})
 	code := run([]string{"update", "--check"}, nil, &out, &errb, env)
 	if code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, errb.String())
 	}
-	if !strings.Contains(out.String(), "already at "+current) {
-		t.Fatalf("stdout=%q, want 'already at %s'", out.String(), current)
+	if !strings.Contains(out.String(), "already at v9.9.9") {
+		t.Fatalf("stdout=%q, want 'already at v9.9.9'", out.String())
 	}
 }
 
 func TestRun_Update_GoInstallPath(t *testing.T) {
 	var out, errb bytes.Buffer
+	setVersion(t, "v0.1.0")
 	env := testEnv(t)
 	tmpdir := t.TempDir()
 	dest := filepath.Join(tmpdir, "mdp")
@@ -531,6 +556,7 @@ func TestRun_Update_GoInstallPath(t *testing.T) {
 
 func TestRun_Update_GoInstallFailsReturns1(t *testing.T) {
 	var out, errb bytes.Buffer
+	setVersion(t, "v0.1.0")
 	env := testEnv(t)
 	tmpdir := t.TempDir()
 	dest := filepath.Join(tmpdir, "mdp")
@@ -552,13 +578,14 @@ func TestRun_Update_GoInstallFailsReturns1(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1; stderr=%s", code, errb.String())
 	}
-	if !strings.Contains(errb.String(), "go install failed") {
-		t.Fatalf("stderr=%q, want 'go install failed'", errb.String())
+	if !strings.Contains(errb.String(), "go install") || !strings.Contains(errb.String(), "failed: boom") {
+		t.Fatalf("stderr=%q, want 'go install ... failed: boom'", errb.String())
 	}
 }
 
 func TestRun_Update_TarballReplacesBinary(t *testing.T) {
 	var out, errb bytes.Buffer
+	setVersion(t, "v0.1.0")
 	env := testEnv(t)
 	tmpdir := t.TempDir()
 	dest := filepath.Join(tmpdir, "mdp")
@@ -567,9 +594,11 @@ func TestRun_Update_TarballReplacesBinary(t *testing.T) {
 	}
 	env.Executable = func() (string, error) { return dest, nil }
 	env.LookPath = func(string) (string, error) { return "", errors.New("not found") }
+	tarball := tarballWithMdp(t, []byte("NEW_BINARY"))
 	env.HTTPGet = fakeGetter(t, map[string][]byte{
-		"releases/latest":      []byte(`{"tag_name":"v9.9.9"}`),
-		"mdp_linux_amd64.tar.gz": tarballWithMdp(t, []byte("NEW_BINARY")),
+		"releases/latest":        []byte(`{"tag_name":"v9.9.9"}`),
+		"checksums.txt":          checksumsFor(map[string][]byte{"mdp_linux_amd64.tar.gz": tarball}),
+		"mdp_linux_amd64.tar.gz": tarball,
 	})
 
 	code := run([]string{"update"}, nil, &out, &errb, env)
@@ -594,6 +623,7 @@ func TestRun_Update_TarballReplacesBinary(t *testing.T) {
 
 func TestRun_Update_TarballUnsupportedArch(t *testing.T) {
 	var out, errb bytes.Buffer
+	setVersion(t, "v0.1.0")
 	env := testEnv(t)
 	env.GOARCH = "riscv64"
 	tmpdir := t.TempDir()
@@ -631,5 +661,165 @@ func TestRun_Update_BadFlag(t *testing.T) {
 	code := run([]string{"update", "--nope"}, nil, &out, &errb, env)
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1", code)
+	}
+}
+
+func TestRun_Update_DevelBuildRefusedWithoutForce(t *testing.T) {
+	var out, errb bytes.Buffer
+	setVersion(t, "")
+	env := testEnv(t)
+	env.HTTPGet = fakeGetter(t, map[string][]byte{
+		"releases/latest": []byte(`{"tag_name":"v9.9.9"}`),
+	})
+	code := run([]string{"update"}, nil, &out, &errb, env)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%s", code, errb.String())
+	}
+	if !strings.Contains(errb.String(), "refusing to overwrite") {
+		t.Fatalf("stderr=%q, want 'refusing to overwrite'", errb.String())
+	}
+}
+
+func TestRun_Update_DevelBuildProceedsWithForce(t *testing.T) {
+	var out, errb bytes.Buffer
+	setVersion(t, "")
+	env := testEnv(t)
+	tmpdir := t.TempDir()
+	dest := filepath.Join(tmpdir, "mdp")
+	_ = os.WriteFile(dest, []byte("OLD"), 0o755)
+	env.Executable = func() (string, error) { return dest, nil }
+	env.LookPath = func(name string) (string, error) {
+		if name == "go" {
+			return "/usr/bin/go", nil
+		}
+		return "", errors.New("not found")
+	}
+	env.HTTPGet = fakeGetter(t, map[string][]byte{
+		"releases/latest": []byte(`{"tag_name":"v9.9.9"}`),
+	})
+	env.RunCmd = func(string, []string, []string) error { return nil }
+	code := run([]string{"update", "--force"}, nil, &out, &errb, env)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, errb.String())
+	}
+}
+
+func TestRun_Update_PinnedVersion(t *testing.T) {
+	var out, errb bytes.Buffer
+	setVersion(t, "v0.1.0")
+	env := testEnv(t)
+	tmpdir := t.TempDir()
+	dest := filepath.Join(tmpdir, "mdp")
+	_ = os.WriteFile(dest, []byte("OLD"), 0o755)
+	env.Executable = func() (string, error) { return dest, nil }
+	env.LookPath = func(name string) (string, error) {
+		if name == "go" {
+			return "/usr/bin/go", nil
+		}
+		return "", errors.New("not found")
+	}
+	env.HTTPGet = func(string) (io.ReadCloser, error) {
+		t.Fatal("HTTPGet should not fire when --version is pinned")
+		return nil, nil
+	}
+	var gotArgs []string
+	env.RunCmd = func(_ string, args, _ []string) error {
+		gotArgs = args
+		return nil
+	}
+	code := run([]string{"update", "--version", "v0.2.0"}, nil, &out, &errb, env)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, errb.String())
+	}
+	if len(gotArgs) != 2 || !strings.HasSuffix(gotArgs[1], "@v0.2.0") {
+		t.Errorf("go install args = %v, want suffix @v0.2.0", gotArgs)
+	}
+}
+
+func TestRun_Update_RejectsInvalidPinnedVersion(t *testing.T) {
+	var out, errb bytes.Buffer
+	setVersion(t, "v0.1.0")
+	env := testEnv(t)
+	code := run([]string{"update", "--version", "rm -rf /"}, nil, &out, &errb, env)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(errb.String(), "invalid --version") {
+		t.Fatalf("stderr=%q, want 'invalid --version'", errb.String())
+	}
+}
+
+func TestRun_Update_RejectsUntrustedTagFromAPI(t *testing.T) {
+	var out, errb bytes.Buffer
+	setVersion(t, "v0.1.0")
+	env := testEnv(t)
+	env.HTTPGet = fakeGetter(t, map[string][]byte{
+		"releases/latest": []byte(`{"tag_name":"../../etc/passwd"}`),
+	})
+	code := run([]string{"update", "--check"}, nil, &out, &errb, env)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(errb.String(), "untrusted tag") {
+		t.Fatalf("stderr=%q, want 'untrusted tag'", errb.String())
+	}
+}
+
+func TestRun_Update_ChecksumMismatchAborts(t *testing.T) {
+	var out, errb bytes.Buffer
+	setVersion(t, "v0.1.0")
+	env := testEnv(t)
+	tmpdir := t.TempDir()
+	dest := filepath.Join(tmpdir, "mdp")
+	_ = os.WriteFile(dest, []byte("OLD"), 0o755)
+	env.Executable = func() (string, error) { return dest, nil }
+	env.LookPath = func(string) (string, error) { return "", errors.New("not found") }
+	tarball := tarballWithMdp(t, []byte("NEW_BINARY"))
+	env.HTTPGet = fakeGetter(t, map[string][]byte{
+		"releases/latest":        []byte(`{"tag_name":"v9.9.9"}`),
+		"checksums.txt":          []byte("deadbeef" + strings.Repeat("0", 56) + "  mdp_linux_amd64.tar.gz\n"),
+		"mdp_linux_amd64.tar.gz": tarball,
+	})
+	code := run([]string{"update"}, nil, &out, &errb, env)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%s", code, errb.String())
+	}
+	if !strings.Contains(errb.String(), "checksum mismatch") {
+		t.Fatalf("stderr=%q, want 'checksum mismatch'", errb.String())
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != "OLD" {
+		t.Errorf("binary changed despite checksum mismatch: %q", got)
+	}
+}
+
+func TestRun_Update_TarballSkipsNonRegularMdpEntry(t *testing.T) {
+	var out, errb bytes.Buffer
+	setVersion(t, "v0.1.0")
+	env := testEnv(t)
+	tmpdir := t.TempDir()
+	dest := filepath.Join(tmpdir, "mdp")
+	_ = os.WriteFile(dest, []byte("OLD"), 0o755)
+	env.Executable = func() (string, error) { return dest, nil }
+	env.LookPath = func(string) (string, error) { return "", errors.New("not found") }
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	_ = tw.WriteHeader(&tar.Header{Name: "mdp", Typeflag: tar.TypeSymlink, Linkname: "/etc/passwd"})
+	_ = tw.Close()
+	_ = gz.Close()
+
+	env.HTTPGet = fakeGetter(t, map[string][]byte{
+		"releases/latest":        []byte(`{"tag_name":"v9.9.9"}`),
+		"checksums.txt":          checksumsFor(map[string][]byte{"mdp_linux_amd64.tar.gz": buf.Bytes()}),
+		"mdp_linux_amd64.tar.gz": buf.Bytes(),
+	})
+	code := run([]string{"update"}, nil, &out, &errb, env)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%s", code, errb.String())
+	}
+	if !strings.Contains(errb.String(), "mdp binary not found") {
+		t.Fatalf("stderr=%q, want 'mdp binary not found'", errb.String())
 	}
 }

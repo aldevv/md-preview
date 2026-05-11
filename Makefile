@@ -3,15 +3,20 @@
 PREFIX ?= $(HOME)/.local
 BIN := $(PREFIX)/bin
 
+# Injected into main.version via -ldflags so `mdp update` can compare
+# against release tags. Falls back to (devel) outside a git checkout.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "(devel)")
+LDFLAGS := -s -w -X main.version=$(VERSION)
+
 build:
-	go build -o mdp ./cmd/mdp
+	go build -ldflags '$(LDFLAGS)' -o mdp ./cmd/mdp
 
 # rm -f clears any md-preview.nvim symlink before install follows it.
 install:
 	mkdir -p $(BIN)
 	rm -f $(BIN)/mdp
-	GOBIN=$(BIN) go install ./cmd/mdp
-	@echo "[mdp] installed $(BIN)/mdp"
+	GOBIN=$(BIN) go install -ldflags '$(LDFLAGS)' ./cmd/mdp
+	@echo "[mdp] installed $(BIN)/mdp ($(VERSION))"
 
 test: test-go
 
