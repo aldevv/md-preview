@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"syscall"
 
@@ -81,6 +82,7 @@ Flags:
 
 Subcommands:
   mdp help                          Show this help
+  mdp version                       Print the installed version and exit
   mdp watch [-t theme] [file]       Open the preview and auto-refresh when
                                     the file changes (any editor). Stays
                                     running until you Ctrl-C.
@@ -104,6 +106,9 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 			return runWatchSubcommand(args[1:], stdout, stderr, env)
 		case "help":
 			fmt.Fprint(stdout, usage)
+			return 0
+		case "version", "--version", "-v":
+			fmt.Fprintln(stdout, buildVersion())
 			return 0
 		}
 	}
@@ -282,6 +287,15 @@ func writeTmpHTML(path string, data []byte) error {
 	defer f.Close()
 	_, err = f.Write(data)
 	return err
+}
+
+// install.sh reads this to skip no-op reinstalls.
+func buildVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok || info.Main.Version == "" {
+		return "(unknown)"
+	}
+	return info.Main.Version
 }
 
 // spawnDetached starts argv in its own session so closing the terminal does
