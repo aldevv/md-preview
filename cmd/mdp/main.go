@@ -86,6 +86,9 @@ Subcommands:
   mdp watch [-t theme] [file]       Open the preview and auto-refresh when
                                     the file changes (any editor). Stays
                                     running until you Ctrl-C.
+  mdp skill path                    Print the path to the bundled skill
+                                    reference (for Claude Code skills and
+                                    other automation driving mdp).
   mdp serve <file> <port> <theme>   Start the preview server (used by the
                                     md-preview.nvim Neovim plugin).
 `
@@ -104,6 +107,8 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 			return runServe(args[1:], stderr)
 		case "watch":
 			return runWatchSubcommand(args[1:], stdout, stderr, env)
+		case "skill":
+			return runSkill(args[1:], stdout, stderr, env)
 		case "help":
 			fmt.Fprint(stdout, usage)
 			return 0
@@ -228,7 +233,7 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 	page := render.BuildPage(body, theme, 0, config.ExtraCSS(cfg, stderr), cfg.Colemak)
 
 	tmpPath := tmpHTMLPath(env.TempDir(), src)
-	if err := writeTmpHTML(tmpPath, []byte(page)); err != nil {
+	if err := writeTmpFile(tmpPath, []byte(page)); err != nil {
 		fmt.Fprintf(stderr, "mdp: writing tmp: %v\n", err)
 		return 1
 	}
@@ -274,12 +279,13 @@ func tmpHTMLPath(tmpdir, src string) string {
 	return filepath.Join(tmpdir, "mdp-"+digest+".html")
 }
 
-// writeTmpHTML writes the page to path with mode 0600 and refuses to follow
+// writeTmpFile writes data to path with mode 0600 and refuses to follow
 // symlinks at the path. The stable filename in a shared /tmp is otherwise
 // vulnerable to a foreign-user-planted symlink redirecting our truncate to
 // e.g. ~/.bashrc; O_NOFOLLOW makes the open fail with ELOOP in that case.
-// O_TRUNC is set so re-runs on the same source overwrite cleanly.
-func writeTmpHTML(path string, data []byte) error {
+// O_TRUNC is set so re-runs on the same source overwrite cleanly. Shared
+// by `mdp <file>` (HTML preview) and `mdp skill path` (extracted reference).
+func writeTmpFile(path string, data []byte) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return err
