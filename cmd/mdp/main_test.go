@@ -793,6 +793,38 @@ func TestRun_Update_ChecksumMismatchAborts(t *testing.T) {
 	}
 }
 
+func TestRun_Update_HTTPGetErrorOnFetchLatest(t *testing.T) {
+	var out, errb bytes.Buffer
+	setVersion(t, "v0.1.0")
+	env := testEnv(t)
+	env.HTTPGet = func(string) (io.ReadCloser, error) {
+		return nil, errors.New("network unreachable")
+	}
+	code := run([]string{"update", "--check"}, nil, &out, &errb, env)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%s", code, errb.String())
+	}
+	if !strings.Contains(errb.String(), "network unreachable") {
+		t.Fatalf("stderr=%q, want 'network unreachable'", errb.String())
+	}
+}
+
+func TestRun_Update_JSONParseError(t *testing.T) {
+	var out, errb bytes.Buffer
+	setVersion(t, "v0.1.0")
+	env := testEnv(t)
+	env.HTTPGet = fakeGetter(t, map[string][]byte{
+		"releases/latest": []byte(`not json at all`),
+	})
+	code := run([]string{"update", "--check"}, nil, &out, &errb, env)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%s", code, errb.String())
+	}
+	if !strings.Contains(errb.String(), "parsing release JSON") {
+		t.Fatalf("stderr=%q, want 'parsing release JSON'", errb.String())
+	}
+}
+
 func TestRun_Update_TarballSkipsNonRegularMdpEntry(t *testing.T) {
 	var out, errb bytes.Buffer
 	setVersion(t, "v0.1.0")

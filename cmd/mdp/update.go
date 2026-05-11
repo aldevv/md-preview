@@ -16,16 +16,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 )
 
 const (
-	updateAPI             = "https://api.github.com/repos/aldevv/md-preview/releases/latest"
-	updateTarballURLFmt   = "https://github.com/aldevv/md-preview/releases/download/%s/mdp_%s_%s.tar.gz"
-	updateChecksumsURLFmt = "https://github.com/aldevv/md-preview/releases/download/%s/checksums.txt"
-	updateGoModule        = "github.com/aldevv/md-preview/cmd/mdp"
+	updateRepo            = "aldevv/md-preview"
+	updateAPI             = "https://api.github.com/repos/" + updateRepo + "/releases/latest"
+	updateTarballURLFmt   = "https://github.com/" + updateRepo + "/releases/download/%s/mdp_%s_%s.tar.gz"
+	updateChecksumsURLFmt = "https://github.com/" + updateRepo + "/releases/download/%s/checksums.txt"
+	updateGoModule        = "github.com/" + updateRepo + "/cmd/mdp"
 	updateMaxTarballBytes = 100 << 20
 	updateHTTPTimeout     = 30 * time.Second
 )
@@ -110,7 +112,7 @@ func runUpdate(args []string, stdout, stderr io.Writer, env Environment) int {
 		return 0
 	}
 
-	fmt.Fprintf(stdout, "mdp update: %s -> %s (downloading release tarball)\n", current, target)
+	fmt.Fprintf(stdout, "mdp update: %s -> %s (fetching release tarball...)\n", current, target)
 	if err := downloadAndReplace(env, target, dest); err != nil {
 		if errors.Is(err, os.ErrPermission) {
 			fmt.Fprintf(stderr, "mdp update: cannot write to %s (permission denied). Re-run with sudo, or reinstall to a user-writable directory.\n", filepath.Dir(dest))
@@ -326,10 +328,28 @@ func httpGet(url string) (io.ReadCloser, error) {
 		return nil, err
 	}
 	if resp.StatusCode/100 != 2 {
+		err := httpErrorFromResponse(resp, url)
 		resp.Body.Close()
-		return nil, fmt.Errorf("HTTP %s for %s", resp.Status, url)
+		return nil, err
 	}
 	return resp.Body, nil
+}
+
+// httpErrorFromResponse turns a non-2xx response into a useful error
+// message. The GitHub-specific case (403 + X-RateLimit-Remaining: 0) is
+// the most common surprise an `mdp update` user hits, so it gets a
+// dedicated hint instead of the generic status-line error.
+func httpErrorFromResponse(resp *http.Response, url string) error {
+	if resp.StatusCode == http.StatusForbidden && resp.Header.Get("X-RateLimit-Remaining") == "0" {
+		reset := resp.Header.Get("X-RateLimit-Reset")
+		if reset != "" {
+			if epoch, err := strconv.ParseInt(reset, 10, 64); err == nil {
+				return fmt.Errorf("GitHub API rate limit exceeded; retry after %s", time.Unix(epoch, 0).Format(time.RFC3339))
+			}
+		}
+		return fmt.Errorf("GitHub API rate limit exceeded; retry later")
+	}
+	return fmt.Errorf("HTTP %s for %s", resp.Status, url)
 }
 
 func runCmdInherit(name string, args, environ []string) error {
