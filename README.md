@@ -113,7 +113,7 @@ The plugin spawns `mdp serve <file> <port> <theme>` as a long-lived loopback HTT
 
 ## Claude Code skill
 
-If you use [Claude Code](https://claude.com/claude-code), there's a companion skill at [`general/.claude/skills/mdp`](https://github.com/aldevv/dotfiles/tree/main/general/.claude/skills/mdp) (in `aldevv/dotfiles`) that lets Claude open markdown content in `mdp` on demand. Trigger it with `/mdp <path>` to render a file, or just say "open this in mdp" / "show me the README rendered" and Claude resolves the file or writes generated content to a tempfile, then spawns `mdp` on it. Per-invocation by design (no auto-trigger). Requires this binary on `$PATH`.
+If you use [Claude Code](https://claude.com/claude-code), there's a companion skill at [`general/.claude/skills/md-preview`](https://github.com/aldevv/dotfiles/tree/main/general/.claude/skills/md-preview) (in `aldevv/dotfiles`) that lets Claude open markdown content in `mdp` on demand. Trigger it with `/md-preview <path>` to render a file, or just say "open this in mdp" / "show me the README rendered" and Claude resolves the file or writes generated content to a tempfile, then spawns `mdp` on it. Per-invocation by design (no auto-trigger). Requires this binary on `$PATH`.
 
 The skill loads its mdp-driving reference from the binary itself via `mdp skill path`, so the canonical guide on invocation modes, tempfile conventions, and spawn semantics ships with the release rather than the skill prose.
 
