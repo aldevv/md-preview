@@ -27,11 +27,26 @@ REPO="aldevv/md-preview"
 
 mkdir -p "$BIN"
 
+installed_version() {
+    if [ -f "$TARGET" ] && [ ! -L "$TARGET" ] && [ -x "$TARGET" ]; then
+        "$TARGET" version 2>/dev/null || true
+    fi
+}
+
+INSTALLED="$(installed_version)"
+if [ -n "${MDP_VERSION:-}" ] && [ "$INSTALLED" = "$MDP_VERSION" ]; then
+    echo "[mdp] already at $INSTALLED — nothing to do"
+    exit 0
+fi
+
+# macOS install(1) follows symlinks and would overwrite md-preview.nvim's
+# Python script at the symlink's target; rm first to be safe.
+rm -f "$TARGET"
+
 # ── Path 1: build from source via Go ────────────────────────────────────
 if command -v go >/dev/null 2>&1; then
-    echo "[mdp] building from source via go install"
+    echo "[mdp] building from source via go install (${MDP_VERSION:-latest})"
     GOBIN="$BIN" go install "$MODULE/cmd/mdp@${MDP_VERSION:-latest}"
-    echo "[mdp] installed $TARGET"
 else
     # ── Path 2: download prebuilt release ───────────────────────────────
     command -v curl >/dev/null 2>&1 || { echo "mdp install: curl or go is required" >&2; exit 1; }
@@ -65,7 +80,13 @@ else
     trap 'rm -rf "$TMP"' EXIT
     curl -fsSL "$URL" | tar -xzf - -C "$TMP"
     install -m 0755 "$TMP/mdp" "$TARGET"
-    echo "[mdp] installed $TARGET"
+fi
+
+NEW="$("$TARGET" version 2>/dev/null || echo "(unknown)")"
+if [ -n "$INSTALLED" ] && [ "$INSTALLED" != "$NEW" ]; then
+    echo "[mdp] upgraded $INSTALLED -> $NEW ($TARGET)"
+else
+    echo "[mdp] installed $NEW ($TARGET)"
 fi
 
 case ":${PATH-}:" in

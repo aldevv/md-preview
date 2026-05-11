@@ -1,10 +1,17 @@
 .PHONY: build install test test-go test-lua test-all lint fmt fmt-check clean
 
+PREFIX ?= $(HOME)/.local
+BIN := $(PREFIX)/bin
+
 build:
 	go build -o mdp ./cmd/mdp
 
+# rm -f clears any md-preview.nvim symlink before install follows it.
 install:
-	go install ./cmd/mdp
+	mkdir -p $(BIN)
+	rm -f $(BIN)/mdp
+	GOBIN=$(BIN) go install ./cmd/mdp
+	@echo "[mdp] installed $(BIN)/mdp"
 
 test: test-go
 
