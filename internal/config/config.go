@@ -195,7 +195,25 @@ var autoBrowserFamilies = []struct {
 	},
 }
 
+// autoMacAppBundles — chromium browsers on macOS ship as .app bundles with
+// nothing on $PATH, so the PATH probe below misses them and a homebrew
+// firefox shim wins. Probe these first on darwin to keep --app= mode.
+var autoMacAppBundles = []string{
+	"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+	"/Applications/Chromium.app/Contents/MacOS/Chromium",
+	"/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+	"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+	"/Applications/Vivaldi.app/Contents/MacOS/Vivaldi",
+}
+
 func autoBrowserCmd(url string, lookPath func(string) (string, error), goos string) []string {
+	if goos == "darwin" {
+		for _, p := range autoMacAppBundles {
+			if _, err := lookPath(p); err == nil {
+				return []string{p, "--app=" + url}
+			}
+		}
+	}
 	for _, fam := range autoBrowserFamilies {
 		for _, name := range fam.bins {
 			if p, err := lookPath(name); err == nil && p != "" {

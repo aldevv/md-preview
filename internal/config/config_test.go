@@ -383,6 +383,44 @@ func TestBrowserCmd_Auto_NoneFound_Mac(t *testing.T) {
 	}
 }
 
+func TestBrowserCmd_Auto_Mac_ChromeAppBeatsFirefox(t *testing.T) {
+	var buf bytes.Buffer
+	chromeBundle := "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+	lp := fakeLookPath(map[string]string{
+		chromeBundle: chromeBundle,
+		"firefox":    "/opt/homebrew/bin/firefox",
+	})
+	got := BrowserCmd(nil, "https://x", lp, "darwin", &buf)
+	want := []string{chromeBundle, "--app=https://x"}
+	if !equalSlice(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestBrowserCmd_Auto_Mac_FallsThroughToFirefox(t *testing.T) {
+	var buf bytes.Buffer
+	lp := fakeLookPath(map[string]string{"firefox": "/opt/homebrew/bin/firefox"})
+	got := BrowserCmd(nil, "https://x", lp, "darwin", &buf)
+	want := []string{"/opt/homebrew/bin/firefox", "--new-window", "https://x"}
+	if !equalSlice(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestBrowserCmd_Auto_Linux_IgnoresMacBundles(t *testing.T) {
+	var buf bytes.Buffer
+	chromeBundle := "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+	lp := fakeLookPath(map[string]string{
+		chromeBundle: chromeBundle,
+		"firefox":    "/usr/bin/firefox",
+	})
+	got := BrowserCmd(nil, "https://x", lp, "linux", &buf)
+	want := []string{"/usr/bin/firefox", "--new-window", "https://x"}
+	if !equalSlice(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
 func TestBrowserCmd_String(t *testing.T) {
 	var buf bytes.Buffer
 	got := BrowserCmd("firefox --foo bar", "https://x", nil, "linux", &buf)
