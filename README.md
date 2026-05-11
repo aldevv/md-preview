@@ -111,6 +111,12 @@ For live scroll-sync — where the rendered page tracks your editor cursor as yo
 
 The plugin spawns `mdp serve <file> <port> <theme>` as a long-lived loopback HTTP+WebSocket server and drives it over stdin newline-delimited JSON (`render`, `scroll`, `quit`). Plugin authors and contributors: see [docs/server.md](docs/server.md) for the IPC contract, endpoints, and internal layout.
 
+## Claude Code skill
+
+If you use [Claude Code](https://claude.com/claude-code), there's a companion skill at [`general/.claude/skills/mdp-plan`](https://github.com/aldevv/dotfiles/tree/main/general/.claude/skills/mdp-plan) (in `aldevv/dotfiles`) that lets you say "open the plan in a markdown window" while in plan mode. Claude writes the plan to a tempfile, runs `mdp` on it, then re-prompts so you can accept or reject after reviewing the rendered version. Per-invocation by design (no auto-trigger). Requires this binary on `$PATH`.
+
+The skill loads its mdp-driving reference from the binary itself via `mdp skill path`, so the canonical guide on invocation modes, tempfile conventions, and spawn semantics ships with the release rather than the skill prose.
+
 ## Contributing
 
 Issues and PRs welcome at [github.com/aldevv/md-preview/issues](https://github.com/aldevv/md-preview/issues).

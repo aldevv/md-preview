@@ -86,6 +86,9 @@ Subcommands:
   mdp watch [-t theme] [file]       Open the preview and auto-refresh when
                                     the file changes (any editor). Stays
                                     running until you Ctrl-C.
+  mdp skill path                    Print the path to the bundled skill
+                                    reference (for Claude Code skills and
+                                    other automation driving mdp).
   mdp serve <file> <port> <theme>   Start the preview server (used by the
                                     md-preview.nvim Neovim plugin).
 `
@@ -104,6 +107,8 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 			return runServe(args[1:], stderr)
 		case "watch":
 			return runWatchSubcommand(args[1:], stdout, stderr, env)
+		case "skill":
+			return runSkill(args[1:], stdout, stderr, env)
 		case "help":
 			fmt.Fprint(stdout, usage)
 			return 0

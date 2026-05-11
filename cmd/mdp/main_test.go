@@ -310,6 +310,63 @@ func TestRun_TempFilenameStable(t *testing.T) {
 	}
 }
 
+func TestRun_SkillPath_ExtractsReference(t *testing.T) {
+	var out, errb bytes.Buffer
+	env := testEnv(t)
+	tmpdir := t.TempDir()
+	env.TempDir = func() string { return tmpdir }
+
+	code := run([]string{"skill", "path"}, nil, &out, &errb, env)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr=%s", code, errb.String())
+	}
+	dest := strings.TrimSpace(out.String())
+	if dest == "" {
+		t.Fatal("stdout did not contain a path")
+	}
+	if filepath.Dir(dest) != tmpdir {
+		t.Errorf("dest %q not under TempDir %q", dest, tmpdir)
+	}
+	data, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("reading extracted ref: %v", err)
+	}
+	if !strings.Contains(string(data), "mdp skill reference") {
+		t.Fatalf("extracted file missing reference header; got %q", string(data[:min(len(data), 200)]))
+	}
+}
+
+func TestRun_SkillPath_RerunOverwritesSamePath(t *testing.T) {
+	var out1, out2, errb bytes.Buffer
+	env := testEnv(t)
+	tmpdir := t.TempDir()
+	env.TempDir = func() string { return tmpdir }
+
+	if code := run([]string{"skill", "path"}, nil, &out1, &errb, env); code != 0 {
+		t.Fatalf("first run exit %d; stderr=%s", code, errb.String())
+	}
+	if code := run([]string{"skill", "path"}, nil, &out2, &errb, env); code != 0 {
+		t.Fatalf("second run exit %d; stderr=%s", code, errb.String())
+	}
+	a := strings.TrimSpace(out1.String())
+	b := strings.TrimSpace(out2.String())
+	if a == "" || a != b {
+		t.Fatalf("skill paths differ across runs: %q vs %q", a, b)
+	}
+}
+
+func TestRun_SkillPath_BadSubcommand(t *testing.T) {
+	var out, errb bytes.Buffer
+	env := testEnv(t)
+	code := run([]string{"skill", "wat"}, nil, &out, &errb, env)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(errb.String(), "Usage: mdp skill path") {
+		t.Fatalf("stderr = %q, want usage", errb.String())
+	}
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a
