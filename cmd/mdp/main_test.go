@@ -1,9 +1,12 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +23,7 @@ func testEnv(t *testing.T) Environment {
 	return Environment{
 		LookPath:   func(string) (string, error) { return "", errors.New("not found") },
 		GOOS:       "linux",
+		GOARCH:     "amd64",
 		Stat:       os.Stat,
 		TempDir:    t.TempDir,
 		Getwd:      func() (string, error) { return ".", nil },
@@ -28,6 +32,9 @@ func testEnv(t *testing.T) Environment {
 		Spawn:      func([]string) error { return nil },
 		Exec:       func(string, []string, []string) error { return nil },
 		RunServer:  func(server.Options) error { return nil },
+		Executable: func() (string, error) { return "", errors.New("not stubbed") },
+		HTTPGet:    func(string) (io.ReadCloser, error) { return nil, errors.New("not stubbed") },
+		RunCmd:     func(string, []string, []string) error { return errors.New("not stubbed") },
 	}
 }
 
@@ -372,4 +379,231 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// fakeGetter returns canned bodies per URL substring; an unknown URL
+// returns an error so tests catch unexpected fetches.
+func fakeGetter(t *testing.T, hits map[string][]byte) func(string) (io.ReadCloser, error) {
+	t.Helper()
+	return func(url string) (io.ReadCloser, error) {
+		for k, v := range hits {
+			if strings.Contains(url, k) {
+				return io.NopCloser(bytes.NewReader(v)), nil
+			}
+		}
+		return nil, errors.New("unexpected URL: " + url)
+	}
+}
+
+// tarballWithMdp returns a gzipped tar containing a single "mdp" entry
+// with the given body, mimicking the goreleaser archive layout.
+func tarballWithMdp(t *testing.T, body []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	hdr := &tar.Header{Name: "mdp", Mode: 0o755, Size: int64(len(body))}
+	if err := tw.WriteHeader(hdr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestRun_UpdateCheck_ReportsAvailable(t *testing.T) {
+	var out, errb bytes.Buffer
+	env := testEnv(t)
+	env.HTTPGet = fakeGetter(t, map[string][]byte{
+		"releases/latest": []byte(`{"tag_name":"v9.9.9"}`),
+	})
+	code := run([]string{"update", "--check"}, nil, &out, &errb, env)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "v9.9.9 available") {
+		t.Fatalf("stdout=%q, want 'v9.9.9 available'", out.String())
+	}
+}
+
+func TestRun_UpdateCheck_AlreadyAtLatest(t *testing.T) {
+	var out, errb bytes.Buffer
+	env := testEnv(t)
+	current := buildVersion()
+	env.HTTPGet = fakeGetter(t, map[string][]byte{
+		"releases/latest": []byte(`{"tag_name":"` + current + `"}`),
+	})
+	code := run([]string{"update", "--check"}, nil, &out, &errb, env)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "already at "+current) {
+		t.Fatalf("stdout=%q, want 'already at %s'", out.String(), current)
+	}
+}
+
+func TestRun_Update_GoInstallPath(t *testing.T) {
+	var out, errb bytes.Buffer
+	env := testEnv(t)
+	tmpdir := t.TempDir()
+	dest := filepath.Join(tmpdir, "mdp")
+	if err := os.WriteFile(dest, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env.Executable = func() (string, error) { return dest, nil }
+	env.LookPath = func(name string) (string, error) {
+		if name == "go" {
+			return "/usr/bin/go", nil
+		}
+		return "", errors.New("not found")
+	}
+	env.HTTPGet = fakeGetter(t, map[string][]byte{
+		"releases/latest": []byte(`{"tag_name":"v9.9.9"}`),
+	})
+
+	var (
+		gotName string
+		gotArgs []string
+		gotEnv  []string
+	)
+	env.RunCmd = func(name string, args, environ []string) error {
+		gotName, gotArgs, gotEnv = name, args, environ
+		return nil
+	}
+
+	code := run([]string{"update"}, nil, &out, &errb, env)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, errb.String())
+	}
+	if gotName != "go" {
+		t.Errorf("cmd name = %q, want go", gotName)
+	}
+	if len(gotArgs) != 2 || gotArgs[0] != "install" || !strings.HasSuffix(gotArgs[1], "@v9.9.9") {
+		t.Errorf("cmd args = %v, want [install <module>@v9.9.9]", gotArgs)
+	}
+	if !strings.HasPrefix(gotArgs[1], updateGoModule+"@") {
+		t.Errorf("module path = %q, want prefix %q@", gotArgs[1], updateGoModule)
+	}
+	foundGobin := false
+	for _, e := range gotEnv {
+		if e == "GOBIN="+tmpdir {
+			foundGobin = true
+			break
+		}
+	}
+	if !foundGobin {
+		t.Errorf("GOBIN=%s not in passed environ", tmpdir)
+	}
+}
+
+func TestRun_Update_GoInstallFailsReturns1(t *testing.T) {
+	var out, errb bytes.Buffer
+	env := testEnv(t)
+	tmpdir := t.TempDir()
+	dest := filepath.Join(tmpdir, "mdp")
+	_ = os.WriteFile(dest, []byte("old"), 0o755)
+	env.Executable = func() (string, error) { return dest, nil }
+	env.LookPath = func(name string) (string, error) {
+		if name == "go" {
+			return "/usr/bin/go", nil
+		}
+		return "", errors.New("not found")
+	}
+	env.HTTPGet = fakeGetter(t, map[string][]byte{
+		"releases/latest": []byte(`{"tag_name":"v9.9.9"}`),
+	})
+	env.RunCmd = func(string, []string, []string) error {
+		return errors.New("boom")
+	}
+	code := run([]string{"update"}, nil, &out, &errb, env)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%s", code, errb.String())
+	}
+	if !strings.Contains(errb.String(), "go install failed") {
+		t.Fatalf("stderr=%q, want 'go install failed'", errb.String())
+	}
+}
+
+func TestRun_Update_TarballReplacesBinary(t *testing.T) {
+	var out, errb bytes.Buffer
+	env := testEnv(t)
+	tmpdir := t.TempDir()
+	dest := filepath.Join(tmpdir, "mdp")
+	if err := os.WriteFile(dest, []byte("OLD"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env.Executable = func() (string, error) { return dest, nil }
+	env.LookPath = func(string) (string, error) { return "", errors.New("not found") }
+	env.HTTPGet = fakeGetter(t, map[string][]byte{
+		"releases/latest":      []byte(`{"tag_name":"v9.9.9"}`),
+		"mdp_linux_amd64.tar.gz": tarballWithMdp(t, []byte("NEW_BINARY")),
+	})
+
+	code := run([]string{"update"}, nil, &out, &errb, env)
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", code, errb.String())
+	}
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "NEW_BINARY" {
+		t.Errorf("binary content = %q, want NEW_BINARY", got)
+	}
+	info, err := os.Stat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o100 == 0 {
+		t.Errorf("binary mode = %v, want executable", info.Mode())
+	}
+}
+
+func TestRun_Update_TarballUnsupportedArch(t *testing.T) {
+	var out, errb bytes.Buffer
+	env := testEnv(t)
+	env.GOARCH = "riscv64"
+	tmpdir := t.TempDir()
+	dest := filepath.Join(tmpdir, "mdp")
+	_ = os.WriteFile(dest, []byte("OLD"), 0o755)
+	env.Executable = func() (string, error) { return dest, nil }
+	env.LookPath = func(string) (string, error) { return "", errors.New("not found") }
+	env.HTTPGet = fakeGetter(t, map[string][]byte{
+		"releases/latest": []byte(`{"tag_name":"v9.9.9"}`),
+	})
+	code := run([]string{"update"}, nil, &out, &errb, env)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%s", code, errb.String())
+	}
+	if !strings.Contains(errb.String(), "unsupported arch") {
+		t.Fatalf("stderr=%q, want 'unsupported arch'", errb.String())
+	}
+}
+
+func TestRun_Update_UnexpectedArg(t *testing.T) {
+	var out, errb bytes.Buffer
+	env := testEnv(t)
+	code := run([]string{"update", "extra"}, nil, &out, &errb, env)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(errb.String(), "unexpected arg") {
+		t.Fatalf("stderr=%q, want 'unexpected arg'", errb.String())
+	}
+}
+
+func TestRun_Update_BadFlag(t *testing.T) {
+	var out, errb bytes.Buffer
+	env := testEnv(t)
+	code := run([]string{"update", "--nope"}, nil, &out, &errb, env)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
 }
