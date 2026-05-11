@@ -26,11 +26,12 @@ import (
 	"github.com/aldevv/md-preview/internal/server"
 )
 
-// Environment is the seam between run() and the OS — production wires it
+// Environment is the seam between run() and the OS. Production wires it
 // up via realEnv, tests substitute fakes.
 type Environment struct {
 	LookPath func(string) (string, error)
 	GOOS     string
+	GOARCH   string
 	Stat     func(string) (os.FileInfo, error)
 	TempDir  func() string
 	Getwd    func() (string, error)
@@ -44,13 +45,20 @@ type Environment struct {
 	Exec       func(path string, argv []string, env []string) error
 	// RunServer starts the preview server and blocks. Stubbed in tests so
 	// the -w/--watch path stays hermetic.
-	RunServer func(server.Options) error
+	RunServer  func(server.Options) error
+	Executable func() (string, error)
+	// HTTPGet returns the response body for 2xx, error otherwise. Caller closes.
+	HTTPGet func(url string) (io.ReadCloser, error)
+	// RunCmd runs synchronously with stdout/stderr inherited. If environ is
+	// nil, the parent environment is used as-is.
+	RunCmd func(name string, args []string, environ []string) error
 }
 
 func realEnv() Environment {
 	return Environment{
 		LookPath:   exec.LookPath,
 		GOOS:       runtime.GOOS,
+		GOARCH:     runtime.GOARCH,
 		Stat:       os.Stat,
 		TempDir:    os.TempDir,
 		Getwd:      func() (string, error) { return os.Getwd() },
@@ -59,6 +67,9 @@ func realEnv() Environment {
 		Spawn:      spawnDetached,
 		Exec:       syscall.Exec,
 		RunServer:  server.Run,
+		Executable: os.Executable,
+		HTTPGet:    httpGet,
+		RunCmd:     runCmdInherit,
 	}
 }
 
@@ -86,6 +97,9 @@ Subcommands:
   mdp watch [-t theme] [file]       Open the preview and auto-refresh when
                                     the file changes (any editor). Stays
                                     running until you Ctrl-C.
+  mdp update [--check]              Update mdp to the latest GitHub release.
+                                    --check only reports whether one is
+                                    available without installing.
   mdp skill path                    Print the path to the bundled skill
                                     reference (for Claude Code skills and
                                     other automation driving mdp).
@@ -93,10 +107,8 @@ Subcommands:
                                     md-preview.nvim Neovim plugin).
 `
 
-// run executes the CLI with the given args and IO. Returns the exit code.
 func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) int {
-	// Seed a commented default config on first run; idempotent thereafter.
-	// Errors are non-fatal — the binary works fine without a config file.
+	// EnsureDefault is idempotent; failure is non-fatal (mdp works without a config).
 	if err := config.EnsureDefault(); err != nil {
 		fmt.Fprintf(stderr, "mdp: seeding default config: %v\n", err)
 	}
@@ -109,6 +121,8 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 			return runWatchSubcommand(args[1:], stdout, stderr, env)
 		case "skill":
 			return runSkill(args[1:], stdout, stderr, env)
+		case "update":
+			return runUpdate(args[1:], stdout, stderr, env)
 		case "help":
 			fmt.Fprint(stdout, usage)
 			return 0

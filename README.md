@@ -38,6 +38,13 @@ Verify the install:
 mdp help
 ```
 
+Update to the latest release in place (uses `go install` if Go is on `PATH`, otherwise downloads the matching release tarball and swaps the binary):
+
+```sh
+mdp update           # install latest
+mdp update --check   # just report whether an update is available
+```
+
 `mdp` auto-detects a browser (Chromium- or Firefox-family, then `xdg-open` / `open`). Override via `browser = ...` in the [config](#config).
 
 ### Optional: `fzf`
