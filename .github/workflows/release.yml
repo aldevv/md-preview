@@ -30,3 +30,21 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Tells aldevv/md-preview.nvim about the new CLI tag. The plugin's bump-cli
+  # workflow pins the tag into mdp-version.txt and cuts a matching patch
+  # release so lazy.nvim users pull the right binary on their next update.
+  # Requires a PAT in PLUGIN_BUMP_TOKEN with Contents: write on the plugin
+  # repo — the default GITHUB_TOKEN cannot dispatch across repositories.
+  notify-plugin:
+    needs: goreleaser
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fire repository_dispatch at md-preview.nvim
+        env:
+          GH_TOKEN: ${{ secrets.PLUGIN_BUMP_TOKEN }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          gh api repos/aldevv/md-preview.nvim/dispatches \
+            -f event_type=cli-release \
+            -f "client_payload[version]=$VERSION"
