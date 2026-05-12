@@ -22,6 +22,7 @@ import (
 	"syscall"
 
 	"github.com/aldevv/md-preview/internal/config"
+	"github.com/aldevv/md-preview/internal/nativewin"
 	"github.com/aldevv/md-preview/internal/render"
 	"github.com/aldevv/md-preview/internal/server"
 )
@@ -52,6 +53,11 @@ type Environment struct {
 	// RunCmd runs synchronously with stdout/stderr inherited. If environ is
 	// nil, the parent environment is used as-is.
 	RunCmd func(name string, args []string, environ []string) error
+	// OpenWindow opens a native preview window at url and blocks until
+	// the user closes it. Returns nativewin.ErrUnsupported when the
+	// platform has no backend or required runtime libraries are missing.
+	// Callers should fall back to Spawn on ErrUnsupported.
+	OpenWindow func(url string) error
 }
 
 func realEnv() Environment {
@@ -70,7 +76,18 @@ func realEnv() Environment {
 		Executable: os.Executable,
 		HTTPGet:    httpGet,
 		RunCmd:     runCmdInherit,
+		OpenWindow: openNativeWindow,
 	}
+}
+
+// openNativeWindow is the production wiring for Environment.OpenWindow.
+// Probes Available() lazily (the Linux probe dlopens libgtk/libwebkit),
+// so users who never opt into the native path don't pay for it.
+func openNativeWindow(url string) error {
+	if !nativewin.Available() {
+		return nativewin.ErrUnsupported
+	}
+	return nativewin.Open(nativewin.Options{URL: url, Title: "mdp"})
 }
 
 func main() {
@@ -420,19 +437,87 @@ func runWatchSubcommand(args []string, stdout, stderr io.Writer, env Environment
 		Theme:   theme,
 		Colemak: cfg.Colemak,
 		Watch:   true,
-		OnListen: func(port int) {
-			url := fmt.Sprintf("http://localhost:%d/", port)
-			argv := config.BrowserCmd(cfg.Browser, url, env.LookPath, env.GOOS, stderr)
-			if err := env.Spawn(argv); err != nil {
-				fmt.Fprintf(stderr, "mdp: launching browser: %v\n", err)
-			}
-		},
+	}
+
+	if envFlagOn("MDP_NATIVE") && env.OpenWindow != nil {
+		return runWatchWithNativeWindow(opts, cfg, env, stderr)
+	}
+	return runWatchWithBrowser(opts, cfg, env, stderr)
+}
+
+// envFlagOn returns true for "1" or "true" so MDP_NATIVE matches the
+// shape of MDP_COLEMAK (see runServe).
+func envFlagOn(name string) bool {
+	v := os.Getenv(name)
+	return v == "1" || v == "true"
+}
+
+// runWatchWithBrowser is the default path: the server blocks the main
+// goroutine, and OnListen asynchronously spawns the user's browser.
+// Behavior matches mdp pre-native-window.
+func runWatchWithBrowser(opts server.Options, cfg config.Config, env Environment, stderr io.Writer) int {
+	opts.OnListen = func(port int) {
+		url := fmt.Sprintf("http://localhost:%d/", port)
+		argv := config.BrowserCmd(cfg.Browser, url, env.LookPath, env.GOOS, stderr)
+		if err := env.Spawn(argv); err != nil {
+			fmt.Fprintf(stderr, "mdp: launching browser: %v\n", err)
+		}
 	}
 	if err := env.RunServer(opts); err != nil {
 		fmt.Fprintf(stderr, "mdp: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+// runWatchWithNativeWindow is the MDP_NATIVE=1 path: the server runs in
+// a goroutine, the native window blocks the main goroutine, and we fall
+// back to spawning the user's browser if the native path is unavailable.
+//
+// Cocoa requires the NSApp run loop on the OS main thread; main_darwin.go
+// locks the main goroutine for that reason. GTK is more forgiving but
+// nativewin.Open also locks for hygiene.
+func runWatchWithNativeWindow(opts server.Options, cfg config.Config, env Environment, stderr io.Writer) int {
+	listenCh := make(chan int, 1)
+	opts.OnListen = func(port int) { listenCh <- port }
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- env.RunServer(opts) }()
+
+	select {
+	case port := <-listenCh:
+		url := fmt.Sprintf("http://localhost:%d/", port)
+		if err := env.OpenWindow(url); err != nil {
+			fmt.Fprintf(stderr, "mdp: native window unavailable (%v); falling back to browser\n", err)
+			argv := config.BrowserCmd(cfg.Browser, url, env.LookPath, env.GOOS, stderr)
+			if e2 := env.Spawn(argv); e2 != nil {
+				fmt.Fprintf(stderr, "mdp: launching browser: %v\n", e2)
+				return 1
+			}
+			if err := <-serverDone; err != nil {
+				fmt.Fprintf(stderr, "mdp: %v\n", err)
+				return 1
+			}
+			return 0
+		}
+		// Window closed cleanly. Drain serverDone non-blocking so a
+		// server-side crash during the session doesn't silently exit 0.
+		select {
+		case err := <-serverDone:
+			if err != nil {
+				fmt.Fprintf(stderr, "mdp: %v\n", err)
+				return 1
+			}
+		default:
+			// Server still running; process exit will clean it up.
+		}
+		return 0
+	case err := <-serverDone:
+		if err != nil {
+			fmt.Fprintf(stderr, "mdp: %v\n", err)
+			return 1
+		}
+		return 0
+	}
 }
 
 // runServe handles `mdp serve <file> <port> <theme>`. The Lua plugin spawns
