@@ -1,7 +1,6 @@
 package latex
 
 import (
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,7 +30,7 @@ func TestHasLatex(t *testing.T) {
 	}
 }
 
-func TestWriteSiblingAssets_WritesAllEmbedded(t *testing.T) {
+func TestWriteSiblingAssets_DecompressesWasm(t *testing.T) {
 	dir, err := WriteSiblingAssets(t.TempDir())
 	if err != nil {
 		t.Fatalf("WriteSiblingAssets: %v", err)
@@ -39,16 +38,27 @@ func TestWriteSiblingAssets_WritesAllEmbedded(t *testing.T) {
 	if filepath.Base(dir) != "mdp-pandoc-"+Version {
 		t.Errorf("dir = %q, want suffix mdp-pandoc-%s", dir, Version)
 	}
-	entries, _ := fs.ReadDir(AssetsFS(), ".")
-	for _, e := range entries {
-		path := filepath.Join(dir, e.Name())
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Errorf("missing sibling %s: %v", e.Name(), err)
-			continue
-		}
-		if info.IsDir() {
-			t.Errorf("sibling %s is a directory", e.Name())
+	wasm := filepath.Join(dir, "pandoc.wasm")
+	info, err := os.Stat(wasm)
+	if err != nil {
+		t.Fatalf("missing pandoc.wasm: %v", err)
+	}
+	if info.Size() < 1024*1024 {
+		t.Errorf("pandoc.wasm = %d bytes, want > 1 MiB (decompressed)", info.Size())
+	}
+	head := make([]byte, 4)
+	f, _ := os.Open(wasm)
+	_, _ = f.Read(head)
+	f.Close()
+	if string(head) != "\x00asm" {
+		t.Errorf("decompressed pandoc.wasm missing WASM magic, got %x", head)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "pandoc.wasm.gz")); err == nil {
+		t.Errorf("pandoc.wasm.gz unexpectedly written; file mode uses raw .wasm")
+	}
+	for _, name := range []string{"pandoc.js", "wasi-shim.js", "latex-render.js", "purify.min.js"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("missing sibling %s: %v", name, err)
 		}
 	}
 }
@@ -59,20 +69,20 @@ func TestWriteSiblingAssets_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first call: %v", err)
 	}
-	wasmGz := filepath.Join(dir, "pandoc.wasm.gz")
-	stat1, err := os.Stat(wasmGz)
+	wasm := filepath.Join(dir, "pandoc.wasm")
+	stat1, err := os.Stat(wasm)
 	if err != nil {
-		t.Fatalf("stat wasm.gz: %v", err)
+		t.Fatalf("stat pandoc.wasm: %v", err)
 	}
 
 	if _, err := WriteSiblingAssets(base); err != nil {
 		t.Fatalf("second call: %v", err)
 	}
-	stat2, err := os.Stat(wasmGz)
+	stat2, err := os.Stat(wasm)
 	if err != nil {
-		t.Fatalf("stat wasm.gz after re-run: %v", err)
+		t.Fatalf("stat pandoc.wasm after re-run: %v", err)
 	}
 	if !stat1.ModTime().Equal(stat2.ModTime()) {
-		t.Errorf("idempotent call rewrote pandoc.wasm.gz (mtime changed)")
+		t.Errorf("idempotent call re-decompressed pandoc.wasm (mtime changed)")
 	}
 }

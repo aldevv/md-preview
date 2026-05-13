@@ -306,26 +306,52 @@ func TestHandler_PostRender_RejectsPathOutsideServedDir(t *testing.T) {
 	}
 }
 
-func TestHandler_LatexAsset_PandocWasmGz(t *testing.T) {
+func TestHandler_LatexAsset_PandocWasm(t *testing.T) {
 	dir := t.TempDir()
 	file := writeMD(t, dir, "doc.md", "# Hello\n")
 	s := newTestState(t, file)
 	srv := httptest.NewServer(newHandler(s))
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/_/pandoc.wasm.gz")
+	resp, err := http.Get(srv.URL + "/_/pandoc.wasm")
 	if err != nil {
-		t.Fatalf("GET /_/pandoc.wasm.gz: %v", err)
+		t.Fatalf("GET /_/pandoc.wasm: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	if ct := resp.Header.Get("Content-Type"); ct != "application/gzip" {
-		t.Errorf("Content-Type = %q, want application/gzip", ct)
+	if ct := resp.Header.Get("Content-Type"); ct != "application/wasm" {
+		t.Errorf("Content-Type = %q, want application/wasm", ct)
 	}
-	if ce := resp.Header.Get("Content-Encoding"); ce != "" {
-		t.Errorf("Content-Encoding = %q, want empty (JS decompresses)", ce)
+	first4 := make([]byte, 4)
+	if _, err := io.ReadFull(resp.Body, first4); err != nil {
+		t.Fatalf("read first 4 bytes: %v", err)
+	}
+	if string(first4) != "\x00asm" {
+		t.Errorf("body does not start with WASM magic; got %x", first4)
+	}
+}
+
+func TestHandler_LatexAsset_PandocWasm_GzipWire(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	s := newTestState(t, file)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/_/pandoc.wasm", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /_/pandoc.wasm: %v", err)
+	}
+	defer resp.Body.Close()
+	if ce := resp.Header.Get("Content-Encoding"); ce != "gzip" {
+		t.Errorf("Content-Encoding = %q, want gzip", ce)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/wasm" {
+		t.Errorf("Content-Type = %q, want application/wasm", ct)
 	}
 	first2 := make([]byte, 2)
 	if _, err := io.ReadFull(resp.Body, first2); err != nil {

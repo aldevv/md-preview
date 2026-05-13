@@ -3,6 +3,7 @@
 package latex
 
 import (
+	"compress/gzip"
 	"crypto/sha256"
 	"embed"
 	"encoding/base64"
@@ -55,10 +56,12 @@ func HasLatex(body string) bool {
 	return strings.Contains(body, `class="latex-pending"`)
 }
 
-// WriteSiblingAssets ensures the WASM + JS bundle lives at
-// <base>/mdp-pandoc-<Version>/ and returns that directory.
-// Idempotent: files matching the embedded size are left alone, so
-// re-runs across many mdp invocations are cheap.
+// WriteSiblingAssets writes the JS sidecars and a decompressed
+// pandoc.wasm to <base>/mdp-pandoc-<Version>/ and returns that path.
+// The pre-decompressed .wasm exists so file:// pages can use
+// WebAssembly.instantiateStreaming directly (DecompressionStream over
+// file:// is noticeably slower than streaming compile on raw wasm).
+// Idempotent: files of the expected size are left alone.
 func WriteSiblingAssets(base string) (string, error) {
 	dir := filepath.Join(base, "mdp-pandoc-"+Version)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -70,12 +73,15 @@ func WriteSiblingAssets(base string) (string, error) {
 		return "", err
 	}
 	for _, e := range entries {
-		if e.IsDir() {
+		if e.IsDir() || e.Name() == "pandoc.wasm.gz" {
 			continue
 		}
 		if err := writeIfChanged(fsys, dir, e.Name()); err != nil {
 			return "", err
 		}
+	}
+	if err := writeDecompressedWasm(fsys, dir); err != nil {
+		return "", err
 	}
 	return dir, nil
 }
@@ -90,6 +96,30 @@ func writeIfChanged(fsys fs.FS, dir, name string) error {
 		return nil
 	}
 	return os.WriteFile(dst, src, 0o644)
+}
+
+func writeDecompressedWasm(fsys fs.FS, dir string) error {
+	dst := filepath.Join(dir, "pandoc.wasm")
+	if info, err := os.Stat(dst); err == nil && info.Size() > 0 {
+		return nil
+	}
+	gz, err := fsys.Open("pandoc.wasm.gz")
+	if err != nil {
+		return err
+	}
+	defer gz.Close()
+	zr, err := gzip.NewReader(gz)
+	if err != nil {
+		return err
+	}
+	defer zr.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, zr)
+	return err
 }
 
 // AssetsDigest returns a stable short hex digest of the embedded

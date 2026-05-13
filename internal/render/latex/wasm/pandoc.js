@@ -53,14 +53,10 @@ const fds = [
 ];
 const options = { debug: false };
 const wasi = new WASI(args, env, fds, options);
-// mdp: decompress in JS so the same path works for HTTP and file://.
-const _pandocResp = await fetch(new URL("./pandoc.wasm.gz", import.meta.url));
-const _pandocBytes = await new Response(
-  _pandocResp.body.pipeThrough(new DecompressionStream("gzip"))
-).arrayBuffer();
-const { instance } = await WebAssembly.instantiate(_pandocBytes, {
-  wasi_snapshot_preview1: wasi.wasiImport,
-});
+const { instance } = await WebAssembly.instantiateStreaming(
+  fetch(new URL("./pandoc.wasm", import.meta.url)),
+  { wasi_snapshot_preview1: wasi.wasiImport },
+);
 
 wasi.initialize(instance);
 instance.exports.__wasm_call_ctors();

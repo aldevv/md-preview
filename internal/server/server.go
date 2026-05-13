@@ -201,6 +201,10 @@ func latexAssetHandler() http.HandlerFunc {
 			http.NotFound(w, r)
 			return
 		}
+		if name == "pandoc.wasm" {
+			serveGzippedWasm(w, r, fsys)
+			return
+		}
 		f, err := fsys.Open(name)
 		if err != nil {
 			http.NotFound(w, r)
@@ -213,8 +217,6 @@ func latexAssetHandler() http.HandlerFunc {
 			return
 		}
 		switch {
-		case strings.HasSuffix(name, ".wasm.gz"):
-			w.Header().Set("Content-Type", "application/gzip")
 		case strings.HasSuffix(name, ".js"):
 			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 		case strings.HasSuffix(name, ".css"):
@@ -222,6 +224,30 @@ func latexAssetHandler() http.HandlerFunc {
 		}
 		http.ServeContent(w, r, name, info.ModTime(), f.(io.ReadSeeker))
 	}
+}
+
+// serveGzippedWasm serves the embedded pandoc.wasm.gz as
+// application/wasm + Content-Encoding: gzip so the browser
+// streams-compiles via instantiateStreaming and saves the wire size.
+func serveGzippedWasm(w http.ResponseWriter, r *http.Request, fsys http.FileSystem) {
+	gz, err := fsys.Open("pandoc.wasm.gz")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer gz.Close()
+	info, err := gz.Stat()
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	h := w.Header()
+	h.Set("Content-Type", "application/wasm")
+	h.Set("Content-Encoding", "gzip")
+	h.Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+	h.Set("Vary", "Accept-Encoding")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, gz)
 }
 
 func (s *state) handleIndex(w http.ResponseWriter, r *http.Request) {
