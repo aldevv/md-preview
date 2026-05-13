@@ -19,11 +19,17 @@ var ErrUnsupported = errors.New("nativewin: unsupported platform or missing runt
 
 // Options configures the native window. Width/Height of 0 use the
 // per-platform default.
+//
+// AssetsDir, when non-empty, registers an mdp:// URI scheme handler
+// that serves files from this directory with proper Content-Type
+// headers. Use with URL = "mdp:///<file>" so the file:// MIME quirk
+// in WebKitGTK doesn't block WebAssembly.compileStreaming.
 type Options struct {
-	URL    string
-	Title  string
-	Width  int
-	Height int
+	URL       string
+	Title     string
+	AssetsDir string
+	Width     int
+	Height    int
 }
 
 func (o Options) titleOrDefault() string {

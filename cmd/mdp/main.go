@@ -372,32 +372,38 @@ func spawnDetached(argv []string) error {
 	return cmd.Start()
 }
 
-// runStaticLatex writes the LaTeX bundle's sibling assets to /tmp,
-// writes a small HTML pointing at them, and opens the file:// URL in
-// the native window (preferred) or the configured browser. Returns
-// immediately like the markdown static path; the child process owns
-// the window lifetime.
+// runStaticLatex writes the LaTeX bundle's sibling assets and a
+// per-preview HTML to the user cache dir, then opens a native window
+// using a custom mdp:// URI scheme so the wasm + JS sidecars come
+// through with the right Content-Type (file:// gives wrong MIME on
+// .wasm in WebKitGTK, defeating streaming compile). Falls back to a
+// browser launch with file:// when the native libs aren't available.
 func runStaticLatex(src, body, theme string, cfg config.Config, env Environment, stderr io.Writer) int {
-	assetsDir, err := latex.WriteSiblingAssets(env.TempDir())
+	cacheBase, err := mdpCacheDir()
+	if err != nil {
+		fmt.Fprintf(stderr, "mdp: cache dir: %v\n", err)
+		return 1
+	}
+	assetsDir, err := latex.WriteSiblingAssets(cacheBase)
 	if err != nil {
 		fmt.Fprintf(stderr, "mdp: writing latex assets: %v\n", err)
 		return 1
 	}
-	page := render.BuildPageWithAssets(body, theme, 0, config.ExtraCSS(cfg, stderr), cfg.Colemak, "file://"+assetsDir+"/")
-	tmpPath := tmpHTMLPath(env.TempDir(), src)
-	if err := writeTmpFile(tmpPath, []byte(page)); err != nil {
-		fmt.Fprintf(stderr, "mdp: writing tmp: %v\n", err)
+	page := render.BuildPageWithAssets(body, theme, 0, config.ExtraCSS(cfg, stderr), cfg.Colemak, "./")
+	htmlBase := htmlBasename(src)
+	htmlPath := filepath.Join(assetsDir, htmlBase)
+	if err := writeTmpFile(htmlPath, []byte(page)); err != nil {
+		fmt.Fprintf(stderr, "mdp: writing html: %v\n", err)
 		return 1
 	}
-	url := "file://" + tmpPath
 	if nativewin.Available() {
 		if exe, err := env.Executable(); err == nil {
-			if err := env.Spawn([]string{exe, "_open-window", url}); err == nil {
+			if err := env.Spawn([]string{exe, "_open-window", assetsDir, "mdp:///" + htmlBase}); err == nil {
 				return 0
 			}
 		}
 	}
-	argv := config.BrowserCmd(cfg.Browser, url, env.LookPath, env.GOOS, stderr)
+	argv := config.BrowserCmd(cfg.Browser, "file://"+htmlPath, env.LookPath, env.GOOS, stderr)
 	if err := env.Spawn(argv); err != nil {
 		fmt.Fprintf(stderr, "mdp: launching browser: %v\n", err)
 		return 1
@@ -405,14 +411,41 @@ func runStaticLatex(src, body, theme string, cfg config.Config, env Environment,
 	return 0
 }
 
+// mdpCacheDir returns ~/.cache/mdp (or platform equivalent),
+// creating it if needed. Persistent (survives /tmp cleanup) and gives
+// the mdp:// scheme a stable IDB origin for the WebAssembly module
+// cache.
+func mdpCacheDir() (string, error) {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(base, "mdp")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// htmlBasename returns a stable per-source filename so repeated runs
+// on the same .tex overwrite rather than accumulate.
+func htmlBasename(src string) string {
+	sum := sha1.Sum([]byte(src))
+	return "mdp-" + hex.EncodeToString(sum[:])[:12] + ".html"
+}
+
 // runOpenWindow is the child-process entry point for the detached
-// native-window host spawned by runStaticLatex. Blocks on gtk_main
-// until the user closes the window, then exits.
-func runOpenWindow(args []string, stderr io.Writer, env Environment) int {
-	if len(args) < 1 || env.OpenWindow == nil {
+// native-window host. Args: <assetsDir> <url>. Registers the mdp://
+// scheme to serve from assetsDir, then blocks on gtk_main.
+func runOpenWindow(args []string, stderr io.Writer, _ Environment) int {
+	if len(args) < 2 {
 		return 1
 	}
-	if err := env.OpenWindow(args[0]); err != nil {
+	if err := nativewin.Open(nativewin.Options{
+		URL:       args[1],
+		AssetsDir: args[0],
+		Title:     "mdp",
+	}); err != nil {
 		fmt.Fprintf(stderr, "mdp: open-window: %v\n", err)
 		return 1
 	}

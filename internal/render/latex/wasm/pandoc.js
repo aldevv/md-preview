@@ -53,18 +53,68 @@ const fds = [
 ];
 const options = { debug: false };
 const wasi = new WASI(args, env, fds, options);
-// mdp: file:// pages get wrong MIME on .wasm in WebKitGTK, so
-// instantiateStreaming rejects. Buffer-then-instantiate works
-// everywhere; the http:// path still benefits from gzip on the wire
-// (browser decompresses transparently before arrayBuffer).
 const _pandocUrl = new URL("./pandoc.wasm", import.meta.url);
 const _pandocImports = { wasi_snapshot_preview1: wasi.wasiImport };
-let instance;
-if (_pandocUrl.protocol === "file:") {
-  const _buf = await (await fetch(_pandocUrl)).arrayBuffer();
-  ({ instance } = await WebAssembly.instantiate(_buf, _pandocImports));
-} else {
-  ({ instance } = await WebAssembly.instantiateStreaming(fetch(_pandocUrl), _pandocImports));
+const _module = await _mdpLoadWasmModule(_pandocUrl);
+const instance = await WebAssembly.instantiate(_module, _pandocImports);
+
+// mdp: cache the compiled WebAssembly.Module in IndexedDB keyed by
+// the upstream sha256 so subsequent launches skip the ~1.9s compile
+// step. WebKit + Chromium both structured-clone Module objects, so
+// the IDB round-trip is bytes-out, bytes-in.
+async function _mdpLoadWasmModule(url) {
+  const key = await _mdpCacheKey(url);
+  const db = await _mdpOpenIDB().catch(() => null);
+  if (db && key) {
+    const cached = await _mdpIdbGet(db, key).catch(() => null);
+    if (cached instanceof WebAssembly.Module) return cached;
+  }
+  // Use arrayBuffer + compile uniformly: WebKitGTK's wasm MIME check
+  // rejects compileStreaming on file:// (wrong MIME) and mdp://
+  // (Content-Type from the scheme handler doesn't propagate). The
+  // buffer path has no MIME check and works on every protocol.
+  let mod;
+  try {
+    mod = await WebAssembly.compileStreaming(fetch(url));
+  } catch (_) {
+    const buf = await (await fetch(url)).arrayBuffer();
+    mod = await WebAssembly.compile(buf);
+  }
+  if (db && key) _mdpIdbPut(db, key, mod).catch(() => {});
+  return mod;
+}
+
+async function _mdpCacheKey(url) {
+  try {
+    const sha = (await (await fetch(new URL("./pandoc.wasm.sha256", url))).text()).split(/\s/)[0];
+    return sha ? "pandoc.wasm:" + sha : null;
+  } catch (_) { return null; }
+}
+
+function _mdpOpenIDB() {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === "undefined") return reject(new Error("no IDB"));
+    const req = indexedDB.open("mdp-wasm-cache", 1);
+    req.onupgradeneeded = () => req.result.createObjectStore("modules");
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function _mdpIdbGet(db, key) {
+  return new Promise((resolve, reject) => {
+    const r = db.transaction("modules", "readonly").objectStore("modules").get(key);
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  });
+}
+
+function _mdpIdbPut(db, key, value) {
+  return new Promise((resolve, reject) => {
+    const r = db.transaction("modules", "readwrite").objectStore("modules").put(value, key);
+    r.onsuccess = () => resolve();
+    r.onerror = () => reject(r.error);
+  });
 }
 
 wasi.initialize(instance);
