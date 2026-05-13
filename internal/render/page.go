@@ -55,6 +55,34 @@ func vimKeys(colemak bool) string {
 	return s
 }
 
+// toastCSS styles the corner toast used by mdpShowToast (link error
+// notices, etc.). Hidden by default, slides in from below on
+// .visible.
+const toastCSS = `
+#mdp-toast {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 9999;
+  max-width: 480px;
+  padding: 12px 16px;
+  border-radius: 6px;
+  background: var(--color-alert-caution);
+  color: #fff;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.4;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.2s ease-out, transform 0.2s ease-out;
+}
+#mdp-toast.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+`
+
 // wsScriptTemplate is the WebSocket scroll/reload client; __PORT__ is replaced
 // with the server port at runtime.
 const wsScriptTemplate = `
@@ -92,22 +120,65 @@ ws.onmessage = (e) => {
         window.scrollTo({ top: targetTop - window.innerHeight * 0.5, behavior: 'smooth' });
     }
     if (msg.type === 'reload') {
+        // The reload broadcast carries the absolute path of whatever
+        // file the server just rendered. Track it so the click
+        // handler resolves relative hrefs against the new dir.
+        if (msg.file) {
+            window.mdpCurrentFile = msg.file;
+        }
         fetch('/').then(r => r.text()).then(html => {
             const doc = new DOMParser().parseFromString(html, 'text/html');
             document.querySelector('#content').innerHTML =
                 doc.querySelector('#content').innerHTML;
             hljs.highlightAll();
             mdpRenderMath();
-            // Drive pandoc.wasm over any latex-pending blocks the
-            // refreshed body introduced; harmless no-op when none exist
-            // or when the renderer module hasn't loaded yet.
-            if (typeof window.mdpRenderLatex === 'function') {
-                window.mdpRenderLatex(document);
-            }
             cacheEls();
         });
     }
 };
+// Click-to-navigate: any <a> inside #content whose href is a local
+// path POSTs to /render. The server's reload broadcast then swaps
+// the page content; on 4xx the server's error message is surfaced
+// via mdpShowToast and the page doesn't change.
+document.getElementById('content').addEventListener('click', (e) => {
+    const a = e.target.closest('a');
+    if (!a) return;
+    const href = a.getAttribute('href');
+    if (!href) return;
+    // Skip anchor links (browser handles) and external schemes.
+    if (href.startsWith('#') || /^[a-z][a-z0-9+.-]*:/i.test(href)) return;
+    e.preventDefault();
+    // Resolve relative hrefs against the current file's directory.
+    let target = href;
+    if (!target.startsWith('/') && window.mdpCurrentFile) {
+        const dir = window.mdpCurrentFile.replace(/\/[^/]*$/, '');
+        target = dir + '/' + href;
+    }
+    // Normalize . and .. segments.
+    const parts = target.split('/');
+    const out = [];
+    for (const seg of parts) {
+        if (seg === '..') out.pop();
+        else if (seg !== '.' && seg !== '') out.push(seg);
+    }
+    target = (target.startsWith('/') ? '/' : '') + out.join('/');
+    fetch('/render', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({file: target})
+    }).then(async (r) => {
+        if (r.ok) return;
+        let msg = 'navigation failed (' + r.status + ')';
+        try {
+            const data = await r.json();
+            if (data && data.error) msg = data.error;
+        } catch (_) {}
+        mdpShowToast(msg);
+    }).catch((err) => {
+        mdpShowToast('navigation failed: ' + err);
+    });
+});
+
 ws.onclose = () => {
     // When the server exits (mdp watch Ctrl-C, or the nvim plugin shutting
     // down) the WS closes. window.close() works for chrome --app= popups;
@@ -130,7 +201,11 @@ ws.onclose = () => {
 // wsPort > 0 embeds the WebSocket scroll/reload client.
 // extraCSS is appended after the default CSS so it wins via cascade.
 // colemak swaps the in-page nav keys from j/k/l to n/e/i.
-func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool) string {
+// currentFile is the absolute path of the document being rendered,
+// exposed to the click handler so it can resolve relative hrefs
+// against its directory. Empty when no file context is meaningful
+// (e.g. ad-hoc RenderBytes callers).
+func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, currentFile string) string {
 	cssVars := CSSDark
 	hljsThemeCSS := hljsThemeDarkCSS
 	if theme == "light" {
@@ -142,6 +217,12 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool) st
 	if wsPort > 0 {
 		wsScript = strings.ReplaceAll(wsScriptTemplate, "__PORT__", fmt.Sprintf("%d", wsPort))
 	}
+	// Embed the current file path as a JS string literal so the
+	// click-to-navigate handler can resolve relative hrefs. Empty
+	// values (RenderBytes, tests) get an empty string; the handler
+	// no-ops when it's empty. fmt.Sprintf("%q", s) is Go-quoting,
+	// valid JS (handles backslashes, quotes, and unicode escapes).
+	currentFileJS := fmt.Sprintf("%q", currentFile)
 
 	// Skip the ~645 KiB KaTeX bundle when the body has no math markers.
 	katexCSSOut, katexJSOut, katexAutoRenderJSOut := "", "", ""
@@ -169,6 +250,7 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool) st
 %s
 %s
 %s
+%s
 .katex { color: var(--color-text-primary); }
 </style>
 </head>
@@ -176,7 +258,32 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool) st
 <div id="content" class="markdown-body">
 %s
 </div>
+<div id="mdp-toast" hidden></div>
 <script>
+window.mdpCurrentFile = %s;
+function mdpShowToast(msg) {
+  const el = document.getElementById('mdp-toast');
+  if (!el) return;
+  el.textContent = msg;
+  el.hidden = false;
+  // Force reflow so the transition kicks in.
+  void el.offsetWidth;
+  el.classList.add('visible');
+  clearTimeout(el._mdpTimer);
+  el._mdpTimer = setTimeout(() => {
+    el.classList.remove('visible');
+    setTimeout(() => { el.hidden = true; }, 250);
+  }, 3000);
+}
+window.mdpShowToast = mdpShowToast;
+// mdpStaticToast is the target of javascript:... hrefs that static
+// mode emits for links it can't honour (out-of-tree, missing,
+// unsupported, over-cap). The payload is URI-encoded; decode and
+// hand off to mdpShowToast.
+function mdpStaticToast(encoded) {
+  mdpShowToast(decodeURIComponent(encoded));
+}
+window.mdpStaticToast = mdpStaticToast;
 %s
 hljs.highlightAll();
 %s
@@ -200,7 +307,7 @@ mdpRenderMath();
 %s
 </script>
 </body>
-</html>`, hljsThemeCSS, cssVars, CSSCommon, pandocCSS, katexCSSOut, extraCSS, body, hljsScript, katexJSOut, katexAutoRenderJSOut, mermaidJSOut, mermaidInit, vimKeys(colemak), wsScript)
+</html>`, hljsThemeCSS, cssVars, CSSCommon, pandocCSS, toastCSS, katexCSSOut, extraCSS, body, currentFileJS, hljsScript, katexJSOut, katexAutoRenderJSOut, mermaidJSOut, mermaidInit, vimKeys(colemak), wsScript)
 }
 
 // hasMermaid reports whether the rendered body contains a mermaid

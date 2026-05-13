@@ -426,7 +426,7 @@ func TestRenderBody_MissingFile(t *testing.T) {
 }
 
 func TestBuildPage_DarkTheme(t *testing.T) {
-	page := BuildPage("<p>x</p>", "dark", 0, "", false)
+	page := BuildPage("<p>x</p>", "dark", 0, "", false, "")
 	wants := []string{
 		"--color-bg-primary: #0d1117",
 		// dark hljs theme: code background is #0d1117
@@ -447,7 +447,7 @@ func TestBuildPage_DarkTheme(t *testing.T) {
 }
 
 func TestBuildPage_LightTheme(t *testing.T) {
-	page := BuildPage("<p>x</p>", "light", 0, "", false)
+	page := BuildPage("<p>x</p>", "light", 0, "", false, "")
 	wants := []string{
 		"--color-bg-primary: #ffffff",
 		// light hljs theme: code background is #fff
@@ -466,14 +466,14 @@ func TestBuildPage_LightTheme(t *testing.T) {
 }
 
 func TestBuildPage_NoWS(t *testing.T) {
-	page := BuildPage("<p>x</p>", "dark", 0, "", false)
+	page := BuildPage("<p>x</p>", "dark", 0, "", false, "")
 	if strings.Contains(page, "new WebSocket") {
 		t.Errorf("expected no WebSocket script when wsPort=0; page contains it")
 	}
 }
 
 func TestBuildPage_WithWS(t *testing.T) {
-	page := BuildPage("<p>x</p>", "dark", 8765, "", false)
+	page := BuildPage("<p>x</p>", "dark", 8765, "", false, "")
 	if !strings.Contains(page, "new WebSocket('ws://localhost:8765/ws')") {
 		t.Errorf("page missing WebSocket connect string for port 8765")
 	}
@@ -481,7 +481,7 @@ func TestBuildPage_WithWS(t *testing.T) {
 
 func TestBuildPage_ExtraCSS(t *testing.T) {
 	marker := "body { font-size: 42px; }"
-	page := BuildPage("<p>x</p>", "dark", 0, marker, false)
+	page := BuildPage("<p>x</p>", "dark", 0, marker, false, "")
 	idxExtra := strings.Index(page, marker)
 	idxCommon := strings.Index(page, ".markdown-body h1 {")
 	if idxExtra < 0 {
@@ -497,13 +497,13 @@ func TestBuildPage_ExtraCSS(t *testing.T) {
 
 func TestBuildPage_VimKeys(t *testing.T) {
 	t.Run("noWS", func(t *testing.T) {
-		page := BuildPage("<p>x</p>", "dark", 0, "", false)
+		page := BuildPage("<p>x</p>", "dark", 0, "", false, "")
 		if !strings.Contains(page, "case 'j':") {
 			t.Errorf("vim-keys script missing when wsPort=0")
 		}
 	})
 	t.Run("withWS", func(t *testing.T) {
-		page := BuildPage("<p>x</p>", "dark", 8765, "", false)
+		page := BuildPage("<p>x</p>", "dark", 8765, "", false, "")
 		if !strings.Contains(page, "case 'j':") {
 			t.Errorf("vim-keys script missing when wsPort>0")
 		}
@@ -512,7 +512,7 @@ func TestBuildPage_VimKeys(t *testing.T) {
 
 func TestBuildPage_QuitKey(t *testing.T) {
 	for _, colemak := range []bool{false, true} {
-		page := BuildPage("<p>x</p>", "dark", 0, "", colemak)
+		page := BuildPage("<p>x</p>", "dark", 0, "", colemak, "")
 		if !strings.Contains(page, "case 'q': window.close();") {
 			t.Errorf("page missing q→close binding (colemak=%v)", colemak)
 		}
@@ -520,7 +520,7 @@ func TestBuildPage_QuitKey(t *testing.T) {
 }
 
 func TestBuildPage_Colemak(t *testing.T) {
-	page := BuildPage("<p>x</p>", "dark", 0, "", true)
+	page := BuildPage("<p>x</p>", "dark", 0, "", true, "")
 	wants := []string{"case 'n':", "case 'e':", "case 'i':", "case 'h':"}
 	for _, want := range wants {
 		if !strings.Contains(page, want) {

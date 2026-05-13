@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/aldevv/md-preview/internal/render"
+	"github.com/aldevv/md-preview/internal/render/pandoc"
 )
 
 const (
@@ -70,10 +71,16 @@ func (s *state) doRender() int {
 }
 
 // renderAndBroadcast re-renders and pushes a reload to every WS client.
-// Used from both the HTTP /render handler and the stdin "render" command.
+// The "file" field carries the current document path so the click
+// handler in the browser keeps relative-href resolution in sync after
+// a navigation. Used from both the HTTP /render handler and the
+// stdin "render" command.
 func (s *state) renderAndBroadcast() int {
 	v := s.doRender()
-	payload, _ := json.Marshal(map[string]any{"type": "reload", "version": v})
+	s.mu.Lock()
+	file := s.file
+	s.mu.Unlock()
+	payload, _ := json.Marshal(map[string]any{"type": "reload", "version": v, "file": file})
 	s.broadcast(string(payload))
 	return v
 }
@@ -194,7 +201,7 @@ func (s *state) handleIndex(w http.ResponseWriter, r *http.Request) {
 	colemak := s.colemak
 	s.mu.Unlock()
 
-	page := render.BuildPage(body, theme, port, "", colemak)
+	page := render.BuildPage(body, theme, port, "", colemak, s.file)
 	encoded := []byte(page)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(len(encoded)))
@@ -227,22 +234,54 @@ func (s *state) handleRender(w http.ResponseWriter, r *http.Request) {
 	if fp, _ := data["file"].(string); fp != "" {
 		abs, err := filepath.Abs(fp)
 		if err != nil {
-			http.Error(w, "bad path", http.StatusBadRequest)
+			writeError(w, http.StatusBadRequest, "bad path")
 			return
 		}
 		s.mu.Lock()
 		dir := s.fileDir
 		s.mu.Unlock()
-		if !pathInsideDir(filepath.Clean(abs), dir) {
-			http.Error(w, "path outside served directory", http.StatusForbidden)
+		cleaned := filepath.Clean(abs)
+		if !pathInsideDir(cleaned, dir) {
+			writeError(w, http.StatusForbidden, "path outside served directory: "+fp)
+			return
+		}
+		info, statErr := os.Stat(cleaned)
+		if statErr != nil || info.IsDir() {
+			writeError(w, http.StatusNotFound, "file not found: "+fp)
+			return
+		}
+		if !isRenderable(cleaned) {
+			writeError(w, http.StatusUnsupportedMediaType, "unsupported format: "+filepath.Ext(cleaned))
 			return
 		}
 		s.mu.Lock()
-		s.file = abs
+		s.file = cleaned
 		s.mu.Unlock()
 	}
 	v := s.renderAndBroadcast()
 	writeJSON(w, map[string]any{"ok": true, "version": v})
+}
+
+// isRenderable reports whether mdp can render path: markdown goes
+// through goldmark, every other extension recognised by
+// pandoc.InputFormat goes through pandoc. Used by /render to refuse
+// links pointing at non-renderable files (binaries, unknown
+// extensions) with a clean 415 rather than rendering garbage.
+func isRenderable(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".md", ".markdown":
+		return true
+	}
+	return pandoc.InputFormat(path) != ""
+}
+
+// writeError serialises a {"error": msg} JSON body with the given
+// HTTP status, matching what the WS-client click handler parses for
+// the toast UI.
+func writeError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
 func (s *state) handleScroll(w http.ResponseWriter, r *http.Request) {

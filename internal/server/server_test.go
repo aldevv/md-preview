@@ -288,6 +288,86 @@ func TestHandler_RejectsForeignHost(t *testing.T) {
 	}
 }
 
+func TestHandler_PostRender_NonexistentFile(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	s := newTestState(t, file)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	missing := filepath.Join(dir, "no-such-file.md")
+	body, _ := json.Marshal(map[string]string{"file": missing})
+	resp, err := http.Post(srv.URL+"/render", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /render: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 for missing file", resp.StatusCode)
+	}
+	var got map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if !strings.Contains(got["error"], "file not found") {
+		t.Errorf(`error = %q, want "file not found..."`, got["error"])
+	}
+}
+
+func TestHandler_PostRender_UnsupportedExtension(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	weird := filepath.Join(dir, "binary.bin")
+	if err := os.WriteFile(weird, []byte("not renderable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestState(t, file)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	body, _ := json.Marshal(map[string]string{"file": weird})
+	resp, err := http.Post(srv.URL+"/render", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /render: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnsupportedMediaType {
+		t.Errorf("status = %d, want 415 for unsupported extension", resp.StatusCode)
+	}
+	var got map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if !strings.Contains(got["error"], "unsupported format") {
+		t.Errorf(`error = %q, want "unsupported format..."`, got["error"])
+	}
+}
+
+func TestHandler_PostRender_AcceptsPandocExtension(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	tex := filepath.Join(dir, "sample.tex")
+	if err := os.WriteFile(tex, []byte(`\section{X}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestState(t, file)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	body, _ := json.Marshal(map[string]string{"file": tex})
+	resp, err := http.Post(srv.URL+"/render", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /render: %v", err)
+	}
+	defer resp.Body.Close()
+	// Either 200 (pandoc present) or some 5xx (pandoc missing). The
+	// dispatch itself should NOT reject .tex with 415 even when the
+	// render later fails, since the extension is in InputFormat.
+	if resp.StatusCode == http.StatusUnsupportedMediaType {
+		t.Errorf("got 415 for .tex; should pass the dispatch check")
+	}
+}
+
 func TestHandler_PostRender_RejectsPathOutsideServedDir(t *testing.T) {
 	dir := t.TempDir()
 	file := writeMD(t, dir, "doc.md", "# Hello\n")

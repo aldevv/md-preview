@@ -19,6 +19,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/aldevv/md-preview/internal/config"
@@ -266,18 +267,36 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 		}
 	}
 
-	body, err := render.RenderBody(src)
-	if err != nil {
-		fmt.Fprintf(stderr, "mdp: %v\n", err)
-		return 1
-	}
-
-	page := render.BuildPage(body, theme, 0, config.ExtraCSS(cfg, stderr), cfg.Colemak)
-
-	tmpPath := tmpHTMLPath(env.TempDir(), src)
-	if err := writeTmpFile(tmpPath, []byte(page)); err != nil {
-		fmt.Fprintf(stderr, "mdp: writing tmp: %v\n", err)
-		return 1
+	// .md entries get the link-graph walker so cross-file clicks work
+	// in static mode. Other extensions render single-file: non-md
+	// docs rarely link to siblings, and a pandoc subprocess per
+	// linked .docx would balloon launch time.
+	var tmpPath string
+	if isMarkdownPath(src) {
+		opts := render.StaticTreeOptions{
+			Theme:    theme,
+			ExtraCSS: config.ExtraCSS(cfg, stderr),
+			Colemak:  cfg.Colemak,
+		}
+		entryHTML, err := render.RenderStaticTree(src, env.TempDir(), opts)
+		if err != nil {
+			fmt.Fprintf(stderr, "mdp: %v\n", err)
+			return 1
+		}
+		tmpPath = entryHTML
+	} else {
+		body, err := render.RenderBody(src)
+		if err != nil {
+			fmt.Fprintf(stderr, "mdp: %v\n", err)
+			return 1
+		}
+		absSrc, _ := filepath.Abs(src)
+		page := render.BuildPage(body, theme, 0, config.ExtraCSS(cfg, stderr), cfg.Colemak, absSrc)
+		tmpPath = tmpHTMLPath(env.TempDir(), src)
+		if err := writeTmpFile(tmpPath, []byte(page)); err != nil {
+			fmt.Fprintf(stderr, "mdp: writing tmp: %v\n", err)
+			return 1
+		}
 	}
 
 	if printPath {
@@ -311,6 +330,18 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 		return 1
 	}
 	return 0
+}
+
+// isMarkdownPath reports whether src has a markdown extension that
+// the goldmark renderer (rather than pandoc) handles. Used by run()
+// to gate the static link-graph walker, which only follows .md
+// links.
+func isMarkdownPath(src string) bool {
+	switch strings.ToLower(filepath.Ext(src)) {
+	case ".md", ".markdown":
+		return true
+	}
+	return false
 }
 
 // tmpHTMLPath returns a stable path so re-runs on the same source
