@@ -53,10 +53,19 @@ const fds = [
 ];
 const options = { debug: false };
 const wasi = new WASI(args, env, fds, options);
-const { instance } = await WebAssembly.instantiateStreaming(
-  fetch(new URL("./pandoc.wasm", import.meta.url)),
-  { wasi_snapshot_preview1: wasi.wasiImport },
-);
+// mdp: file:// pages get wrong MIME on .wasm in WebKitGTK, so
+// instantiateStreaming rejects. Buffer-then-instantiate works
+// everywhere; the http:// path still benefits from gzip on the wire
+// (browser decompresses transparently before arrayBuffer).
+const _pandocUrl = new URL("./pandoc.wasm", import.meta.url);
+const _pandocImports = { wasi_snapshot_preview1: wasi.wasiImport };
+let instance;
+if (_pandocUrl.protocol === "file:") {
+  const _buf = await (await fetch(_pandocUrl)).arrayBuffer();
+  ({ instance } = await WebAssembly.instantiate(_buf, _pandocImports));
+} else {
+  ({ instance } = await WebAssembly.instantiateStreaming(fetch(_pandocUrl), _pandocImports));
+}
 
 wasi.initialize(instance);
 instance.exports.__wasm_call_ctors();

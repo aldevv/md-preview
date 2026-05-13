@@ -3,6 +3,7 @@
 package latex
 
 import (
+	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"embed"
@@ -92,7 +93,7 @@ func writeIfChanged(fsys fs.FS, dir, name string) error {
 		return err
 	}
 	dst := filepath.Join(dir, name)
-	if cur, err := os.ReadFile(dst); err == nil && len(cur) == len(src) {
+	if cur, err := os.ReadFile(dst); err == nil && bytes.Equal(cur, src) {
 		return nil
 	}
 	return os.WriteFile(dst, src, 0o644)
