@@ -4,6 +4,7 @@ package render
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	gohtml "html"
 	"os"
@@ -140,14 +141,10 @@ func isLatexLang(language []byte) bool {
 	return false
 }
 
-// emitLatexFence writes a <div class="latex-pending"> placeholder
-// carrying the base64-encoded fence body. The page's latex-render.js
-// hands the source to pandoc.wasm and replaces the placeholder with
-// sanitized HTML once the WASM module finishes initializing.
-//
-// No server-side render-error path: pandoc.wasm runs in the browser,
-// so failures surface client-side (latex-render.js swaps the
-// placeholder for a .latex-error div on convert() throwing).
+// emitLatexFence renders the fence body via host pandoc when it's on
+// PATH (~13 ms warm, ~150x faster than the WASM path) and falls back
+// to a latex-pending placeholder for the client-side wasm renderer
+// when pandoc isn't installed.
 func (d *dataLineRenderer) emitLatexFence(w util.BufWriter, source []byte, n *ast.FencedCodeBlock) {
 	var body bytes.Buffer
 	for i := 0; i < n.Lines().Len(); i++ {
@@ -161,6 +158,21 @@ func (d *dataLineRenderer) emitLatexFence(w util.BufWriter, source []byte, n *as
 			dataLine = string(typed)
 		case string:
 			dataLine = typed
+		}
+	}
+	if latex.PandocAvailable() {
+		rendered, err := latex.Render(context.Background(), body.Bytes(), d.sourceDir)
+		if err == nil {
+			_, _ = w.WriteString(`<div class="latex-block"`)
+			if dataLine != "" {
+				_, _ = w.WriteString(` data-line="`)
+				_, _ = w.WriteString(dataLine)
+				_, _ = w.WriteString(`"`)
+			}
+			_, _ = w.WriteString(`>`)
+			_, _ = w.WriteString(rendered)
+			_, _ = w.WriteString("</div>\n")
+			return
 		}
 	}
 	_, _ = w.WriteString(latex.Placeholder(body.Bytes(), dataLine))
@@ -347,6 +359,12 @@ func RenderBody(path string) (string, error) {
 		return fmt.Sprintf("<p>Error reading file: %s</p>", gohtml.EscapeString(err.Error())), err
 	}
 	if IsLatexPath(path) {
+		if latex.PandocAvailable() {
+			rendered, err := latex.Render(context.Background(), content, filepath.Dir(path))
+			if err == nil {
+				return `<div class="latex-block">` + rendered + `</div>`, nil
+			}
+		}
 		return latex.Placeholder(content, ""), nil
 	}
 	sourceDir := filepath.Dir(path)

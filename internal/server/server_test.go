@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/aldevv/md-preview/internal/render/latex"
 )
 
 func writeMD(t *testing.T, dir, name, content string) string {
@@ -423,10 +425,15 @@ func TestHandler_LatexAsset_RejectsTraversal(t *testing.T) {
 }
 
 func TestHandler_LatexPage_WiresUpScripts(t *testing.T) {
+	// Force the WASM-fallback path so we test the placeholder + script
+	// wiring (with pandoc on PATH the body has rendered HTML inline,
+	// no script tags). The pandoc-rendered path is covered in
+	// render_test.go's TestRenderFencedLatex_PandocPath.
+	t.Setenv("PATH", "/nonexistent")
+	latex.ResetPandocProbe()
+	defer latex.ResetPandocProbe()
+
 	dir := t.TempDir()
-	// A .md with a fenced LaTeX block must include the latex-pending
-	// placeholder in the body AND the script tags for pandoc.wasm
-	// glue + DOMPurify. Math-free .md pages must skip both.
 	file := writeMD(t, dir, "doc.md", "prose\n\n```latex\n\\section{X}\n```\n")
 	s := newTestState(t, file)
 	srv := httptest.NewServer(newHandler(s))

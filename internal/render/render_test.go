@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/aldevv/md-preview/internal/render/latex"
 )
 
 func TestStripFrontmatter(t *testing.T) {
@@ -165,11 +167,32 @@ func TestRenderFencedCode(t *testing.T) {
 	}
 }
 
-// Fenced ```latex / ```tex / ```pandoc-latex blocks now emit a
-// client-side placeholder; pandoc.wasm in the browser turns it into
-// HTML. The Go side just has to encode the source and stamp data-line.
+// hideFromPath empties PATH for the duration of the test so the
+// pandoc lookup miss and the WASM-placeholder fallback engages.
+// Resets latex.pandocBin via package-internal hook to bypass the
+// sync.Once cache.
+func hideFromPath(t *testing.T) {
+	t.Helper()
+	t.Setenv("PATH", "/nonexistent")
+	latex.ResetPandocProbe()
+}
 
-func TestRenderFencedLatex_EmitsPlaceholder(t *testing.T) {
+func TestRenderFencedLatex_PandocPath(t *testing.T) {
+	if !latex.PandocAvailable() {
+		t.Skip("pandoc not on PATH; covered by the fallback test")
+	}
+	src := "Prose.\n\n```latex\n\\textbf{bold}\n```\n"
+	out := RenderBytes([]byte(src))
+	if !strings.Contains(out, `class="latex-block"`) {
+		t.Errorf("expected latex-block (pandoc-rendered), got: %q", out)
+	}
+	if !strings.Contains(out, `<strong>bold</strong>`) {
+		t.Errorf("expected <strong>bold</strong> from pandoc, got: %q", out)
+	}
+}
+
+func TestRenderFencedLatex_WasmFallback(t *testing.T) {
+	hideFromPath(t)
 	body := "\\section{Hello}\nWith \\emph{emphasis}.\n"
 	src := "Prose.\n\n```latex\n" + body + "```\n\nAfter.\n"
 	out := RenderBytes([]byte(src))
@@ -181,11 +204,12 @@ func TestRenderFencedLatex_EmitsPlaceholder(t *testing.T) {
 		t.Errorf("expected base64-encoded source in placeholder, got: %q", out)
 	}
 	if strings.Contains(out, `class="language-latex"`) {
-		t.Errorf("latex fence was emitted as a code block, not a placeholder")
+		t.Errorf("latex fence emitted as code block, not a placeholder")
 	}
 }
 
-func TestRenderFencedTex_AlsoPlaceholder(t *testing.T) {
+func TestRenderFencedTex_WasmFallback(t *testing.T) {
+	hideFromPath(t)
 	src := "```tex\n\\textbf{bold}\n```\n"
 	out := RenderBytes([]byte(src))
 	if !strings.Contains(out, `class="latex-pending"`) {
@@ -204,7 +228,8 @@ func TestRenderFencedNonLatex_StaysAsCodeBlock(t *testing.T) {
 	}
 }
 
-func TestRenderBody_TexExtensionEmitsPlaceholder(t *testing.T) {
+func TestRenderBody_TexExtensionWasmFallback(t *testing.T) {
+	hideFromPath(t)
 	tmp := t.TempDir()
 	path := tmp + "/sample.tex"
 	body := []byte(`\section{From tex}`)
@@ -225,9 +250,7 @@ func TestRenderBody_TexExtensionEmitsPlaceholder(t *testing.T) {
 }
 
 func TestRenderFencedLatex_DataLinePreserved(t *testing.T) {
-	// Fence opens on line 3 (1-indexed). The placeholder must carry
-	// that data-line so scroll-sync still targets the right paragraph
-	// before the client renders the LaTeX into a .latex-block wrapper.
+	hideFromPath(t)
 	src := "prose\n\n```latex\n\\section{X}\n```\n"
 	out := RenderBytes([]byte(src))
 	if !strings.Contains(out, `class="latex-pending"`) {
