@@ -380,10 +380,19 @@ func spawnDetached(argv []string) error {
 // runStaticServer is the auto-promotion path for static-mode previews
 // that contain LaTeX. file:// URLs can't fetch pandoc.wasm, so when
 // the rendered body has a latex-pending placeholder we run the same
-// HTTP server `mdp watch` uses (watcher included so editor reloads
-// keep working) and block until the user Ctrl-Cs. The non-LaTeX
-// static path still goes through the original write-tmp-and-open
-// flow.
+// HTTP server mdp watch uses. The non-LaTeX static path still goes
+// through the original write-tmp-and-open flow.
+//
+// Prefers the native window because a one-shot LaTeX preview is the
+// classic "open this file in a viewer" UX: chromeless, single-window,
+// closes cleanly. Falls back to a browser launch (same fallback that
+// runWatchWithNativeWindow uses) when env.OpenWindow is unset or the
+// underlying GTK/WebKit libs aren't installed.
+//
+// Note: this is the one place the native window engages without
+// MDP_NATIVE=1. The watch subcommand stays browser-default for
+// backward compatibility; static-mode LaTeX is brand-new behavior and
+// the native window is the better default for it.
 func runStaticServer(src, theme string, cfg config.Config, env Environment, stderr io.Writer) int {
 	opts := server.Options{
 		File:    src,
@@ -391,19 +400,11 @@ func runStaticServer(src, theme string, cfg config.Config, env Environment, stde
 		Theme:   theme,
 		Colemak: cfg.Colemak,
 		Watch:   true,
-		OnListen: func(port int) {
-			url := fmt.Sprintf("http://localhost:%d/", port)
-			argv := config.BrowserCmd(cfg.Browser, url, env.LookPath, env.GOOS, stderr)
-			if err := env.Spawn(argv); err != nil {
-				fmt.Fprintf(stderr, "mdp: launching browser: %v\n", err)
-			}
-		},
 	}
-	if err := env.RunServer(opts); err != nil {
-		fmt.Fprintf(stderr, "mdp: %v\n", err)
-		return 1
+	if env.OpenWindow != nil {
+		return runWatchWithNativeWindow(opts, cfg, env, stderr)
 	}
-	return 0
+	return runWatchWithBrowser(opts, cfg, env, stderr)
 }
 
 // runWatchSubcommand handles `mdp watch [-t theme] [file]`. Picks a file
