@@ -218,6 +218,7 @@ ws.onmessage = (e) => {
             document.querySelector('#content').innerHTML =
                 doc.querySelector('#content').innerHTML;
             hljs.highlightAll();
+            mdpRenderMath();
             cacheEls();
         });
     }
@@ -258,6 +259,17 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool) st
 		wsScript = strings.ReplaceAll(wsScriptTemplate, "__PORT__", fmt.Sprintf("%d", wsPort))
 	}
 
+	// Skip the ~645 KiB KaTeX bundle when the body has no math markers.
+	// The vast majority of markdown previews are math-free and shouldn't
+	// pay that cost. mdpRenderMath() is still defined unconditionally
+	// (it no-ops when renderMathInElement is undefined).
+	katexCSSOut, katexJSOut, katexAutoRenderJSOut := "", "", ""
+	if hasMath(body) {
+		katexCSSOut = katexCSS
+		katexJSOut = katexScript
+		katexAutoRenderJSOut = katexAutoRenderScript
+	}
+
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <head>
@@ -268,6 +280,8 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool) st
 %s
 %s
 %s
+%s
+.katex { color: var(--color-text-primary); }
 </style>
 </head>
 <body>
@@ -279,7 +293,43 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool) st
 hljs.highlightAll();
 %s
 %s
+function mdpRenderMath() {
+  if (typeof renderMathInElement !== "function") return;
+  renderMathInElement(document.querySelector("#content"), {
+    delimiters: [
+      {left: "$$", right: "$$", display: true},
+      {left: "\\[", right: "\\]", display: true},
+      {left: "\\(", right: "\\)", display: false}
+    ],
+    throwOnError: false
+  });
+}
+mdpRenderMath();
+%s
+%s
 </script>
 </body>
-</html>`, hljsThemeCSS, cssVars, CSSCommon, extraCSS, body, hljsScript, vimKeys(colemak), wsScript)
+</html>`, hljsThemeCSS, cssVars, CSSCommon, katexCSSOut, extraCSS, body, hljsScript, katexJSOut, katexAutoRenderJSOut, vimKeys(colemak), wsScript)
+}
+
+// hasMath checks whether the rendered body has any math markers worth
+// loading KaTeX for. Detection is cheap (substring scan) and only needs
+// to be correct enough to skip the bundle when truly math-free; a false
+// positive just pays the bundle cost we'd already accept by default.
+//
+// Single-dollar delimiters are intentionally NOT detected: KaTeX
+// auto-render isn't configured for them (prose like `Costs $5 and $10`
+// produced too many false positives), so a body whose only math marker
+// is a bare `$` won't render either way.
+func hasMath(body string) bool {
+	for _, marker := range []string{
+		`\(`, `\[`, `$$`,
+		`class="math inline"`, `class="math display"`,
+		`class="latex-block"`, `class="latex-error"`,
+	} {
+		if strings.Contains(body, marker) {
+			return true
+		}
+	}
+	return false
 }
