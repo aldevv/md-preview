@@ -33,3 +33,18 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go vet ./...
+
+  test:
+    name: go test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # pandoc lets the LaTeX renderer tests actually run instead of
+      # skipping silently. The sandbox + sanitizer regression tests
+      # depend on it.
+      - name: install pandoc
+        run: sudo apt-get update && sudo apt-get install -y pandoc
+      - run: go test ./...
