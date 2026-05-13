@@ -1,4 +1,4 @@
-.PHONY: build install test test-go test-lua test-all lint fmt fmt-check clean pandoc-wasm
+.PHONY: build install test test-go test-lua test-e2e test-all lint fmt fmt-check clean pandoc-wasm
 
 PREFIX ?= $(HOME)/.local
 BIN := $(PREFIX)/bin
@@ -32,6 +32,18 @@ test: test-go
 
 test-go:
 	go test ./...
+
+# Browser end-to-end suite. Drives a headless Chromium via playwright-go
+# against the production handler to confirm pandoc.wasm actually
+# initializes + latex-render.js swaps placeholders + KaTeX picks up
+# math markers. Gated behind the `e2e` build tag so the default
+# `go test ./...` stays hermetic. Requires the Chromium binary; run
+# once after a fresh clone:
+#
+#	go install github.com/playwright-community/playwright-go/cmd/playwright@latest
+#	playwright install --with-deps chromium
+test-e2e:
+	go test -tags=e2e -timeout 90s -v ./internal/server/ -run TestE2E
 
 # Re-fetch pandoc.wasm from the pinned upstream release, verify the
 # sha256 of the uncompressed bytes (matches upstream's published

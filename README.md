@@ -141,10 +141,23 @@ Issues and PRs welcome at [github.com/aldevv/md-preview/issues](https://github.c
 make test         # go test ./...
 make build        # produces ./mdp
 make install      # go install ./cmd/mdp
-make pandoc-wasm  # refresh the embedded pandoc.wasm (only when bumping PANDOC_WASM_VERSION)
+make pandoc-wasm  # refresh the embedded pandoc.wasm.gz (when bumping PANDOC_WASM_VERSION)
+make test-e2e     # browser end-to-end suite (needs Chromium, see below)
 ```
 
-The repo ships `internal/render/latex/wasm/pandoc.wasm` (58 MB) so that `go install github.com/aldevv/md-preview/cmd/mdp@latest` builds cleanly without a separate fetch step. To upgrade it, bump `PANDOC_WASM_VERSION` in the Makefile, run `make pandoc-wasm`, then commit the new `pandoc.wasm` + `pandoc.wasm.sha256` together.
+The repo ships `internal/render/latex/wasm/pandoc.wasm.gz` (16 MB, gzipped from upstream's 58 MB) so that `go install github.com/aldevv/md-preview/cmd/mdp@latest` builds cleanly without a separate fetch step. Browsers decode the gzip transparently during `WebAssembly.instantiateStreaming` via the `Content-Encoding: gzip` header mdp sends on the `/_/pandoc.wasm` route, so there's no runtime decompression cost. To upgrade it, bump `PANDOC_WASM_VERSION` in the Makefile, run `make pandoc-wasm`, then commit the new `pandoc.wasm.gz` + `pandoc.wasm.sha256` together.
+
+### Browser e2e tests
+
+`internal/server/latex_e2e_test.go` (build tag `e2e`) drives a headless Chromium via [playwright-go](https://github.com/playwright-community/playwright-go) against the production handler and asserts that pandoc.wasm initializes, `latex-render.js` swaps `.latex-pending` placeholders, KaTeX picks up math markers, and math-free markdown does NOT pull in the WASM bundle. Run them with `make test-e2e` after a one-time setup:
+
+```sh
+go install github.com/playwright-community/playwright-go/cmd/playwright@latest
+playwright install --with-deps chromium
+make test-e2e
+```
+
+The default `go test ./...` skips these (no `-tags=e2e`), so CI and local hacking stay hermetic. Run them before bumping `PANDOC_WASM_VERSION` or touching anything under `internal/render/latex/wasm/`.
 
 ## License
 
