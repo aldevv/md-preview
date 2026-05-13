@@ -10,7 +10,6 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -260,14 +259,15 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 		theme = "dark"
 	}
 
-	body, err := render.RenderBody(src)
-	if err != nil {
-		if errors.Is(err, latex.ErrPandocNotFound) {
-			fmt.Fprintln(stderr, "mdp: LaTeX rendering requires pandoc. Install with:")
-			fmt.Fprintln(stderr, "  apt install pandoc   # Debian/Ubuntu")
-			fmt.Fprintln(stderr, "  brew install pandoc  # macOS")
+	if render.IsLatexPath(src) {
+		if _, err := latex.EnsurePandoc(context.Background(), stderr); err != nil {
+			fmt.Fprintf(stderr, "mdp: %v\n", err)
 			return 1
 		}
+	}
+
+	body, err := render.RenderBody(src)
+	if err != nil {
 		fmt.Fprintf(stderr, "mdp: %v\n", err)
 		return 1
 	}
@@ -441,6 +441,13 @@ func runWatchSubcommand(args []string, stdout, stderr io.Writer, env Environment
 		theme = "dark"
 	}
 
+	if render.IsLatexPath(src) {
+		if _, err := latex.EnsurePandoc(context.Background(), stderr); err != nil {
+			fmt.Fprintf(stderr, "mdp: %v\n", err)
+			return 1
+		}
+	}
+
 	opts := server.Options{
 		File:    src,
 		Port:    0, // kernel-assigned ephemeral port
@@ -550,6 +557,12 @@ func runServe(args []string, stderr io.Writer) int {
 	}
 	if v := os.Getenv("MDP_COLEMAK"); v == "1" || v == "true" {
 		colemak = true
+	}
+	if render.IsLatexPath(args[0]) {
+		if _, err := latex.EnsurePandoc(context.Background(), stderr); err != nil {
+			fmt.Fprintf(stderr, "mdp serve: %v\n", err)
+			return 1
+		}
 	}
 	opts := server.Options{
 		File:    args[0],

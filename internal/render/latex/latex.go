@@ -31,8 +31,8 @@ const (
 )
 
 var (
-	pandocOnce sync.Once
-	pandocBin  string
+	pandocOnceMu sync.Mutex
+	pandocBin    string
 
 	sanitizer = func() *bluemonday.Policy {
 		p := bluemonday.UGCPolicy()
@@ -41,22 +41,31 @@ var (
 	}()
 )
 
-// PandocAvailable reports whether a usable pandoc binary is on PATH.
-// Cached: the LookPath probe runs once per process.
+// PandocAvailable reports whether a usable pandoc binary is already
+// known to mdp: either on $PATH or previously auto-fetched into the
+// cache. Does NOT download. Call EnsurePandoc to download on demand.
 func PandocAvailable() bool {
-	pandocOnce.Do(func() {
-		if p, err := exec.LookPath("pandoc"); err == nil {
-			pandocBin = p
-		}
-	})
-	return pandocBin != ""
+	pandocOnceMu.Lock()
+	defer pandocOnceMu.Unlock()
+	if pandocBin != "" {
+		return true
+	}
+	if p, err := exec.LookPath("pandoc"); err == nil {
+		pandocBin = p
+		return true
+	}
+	if p, ok := findCachedPandoc(); ok {
+		pandocBin = p
+		return true
+	}
+	return false
 }
 
-// ResetPandocProbe clears the LookPath cache. Tests use this with
-// t.Setenv("PATH", ...) to drive both pandoc-present and pandoc-
-// missing paths in the same process.
+// ResetPandocProbe clears the cached probe result. Tests use this
+// with t.Setenv("PATH", ...) to exercise both states in one process.
 func ResetPandocProbe() {
-	pandocOnce = sync.Once{}
+	pandocOnceMu.Lock()
+	defer pandocOnceMu.Unlock()
 	pandocBin = ""
 }
 
