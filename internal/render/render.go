@@ -4,13 +4,19 @@ package render
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"errors"
 	"fmt"
 	gohtml "html"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
+	"github.com/aldevv/md-preview/internal/render/latex"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
@@ -31,7 +37,7 @@ var dataLineAttr = []byte("data-line")
 // WithUnsafe is intentionally NOT enabled: raw HTML in markdown would
 // execute as scripts in the localhost-bound preview origin, giving any
 // cloned README drive-by access to the local browser session.
-func newMarkdown() goldmark.Markdown {
+func newMarkdown(sourceDir string) goldmark.Markdown {
 	return goldmark.New(
 		goldmark.WithExtensions(extension.GFM, Alerts),
 		goldmark.WithParserOptions(
@@ -41,7 +47,7 @@ func newMarkdown() goldmark.Markdown {
 			),
 		),
 		goldmark.WithRendererOptions(
-			renderer.WithNodeRenderers(util.Prioritized(newDataLineRenderer(), 100)),
+			renderer.WithNodeRenderers(util.Prioritized(newDataLineRenderer(sourceDir), 100)),
 		),
 	)
 }
@@ -51,10 +57,15 @@ func newMarkdown() goldmark.Markdown {
 // on the generated <pre>.
 type dataLineRenderer struct {
 	html.Config
+	// sourceDir is the directory of the source markdown file; passed to
+	// latex.Render so \input{} in fenced LaTeX resolves relative to the
+	// document, not to mdp's CWD. Empty for tests / RenderBytes callers
+	// that don't have a file backing them.
+	sourceDir string
 }
 
-func newDataLineRenderer() *dataLineRenderer {
-	return &dataLineRenderer{Config: html.NewConfig()}
+func newDataLineRenderer(sourceDir string) *dataLineRenderer {
+	return &dataLineRenderer{Config: html.NewConfig(), sourceDir: sourceDir}
 }
 
 func (d *dataLineRenderer) SetOption(name renderer.OptionName, value any) {
@@ -91,6 +102,16 @@ func (d *dataLineRenderer) writeLines(w util.BufWriter, source []byte, n ast.Nod
 
 func (d *dataLineRenderer) renderFencedCodeBlock(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	n := node.(*ast.FencedCodeBlock)
+	if isLatexLang(n.Language(source)) {
+		// Both entering and !entering pass through here; emit the full
+		// <div>...</div> on entering and a no-op on closing. Children of
+		// a FencedCodeBlock are body lines (no separate AST nodes), so
+		// no walk-status special-casing is needed.
+		if entering {
+			d.emitLatexFence(w, source, n)
+		}
+		return ast.WalkContinue, nil
+	}
 	if entering {
 		_, _ = w.WriteString("<pre")
 		writeDataLineAttr(w, node)
@@ -107,6 +128,69 @@ func (d *dataLineRenderer) renderFencedCodeBlock(w util.BufWriter, source []byte
 		_, _ = w.WriteString("</code></pre>\n")
 	}
 	return ast.WalkContinue, nil
+}
+
+// isLatexLang reports whether the fence info string requests LaTeX
+// rendering. Accepts "latex", "tex", and "pandoc-latex" (case
+// insensitive).
+func isLatexLang(language []byte) bool {
+	if language == nil {
+		return false
+	}
+	switch strings.ToLower(string(language)) {
+	case "latex", "tex", "pandoc-latex":
+		return true
+	}
+	return false
+}
+
+// fenceCache memoizes pandoc invocations for fenced LaTeX blocks by
+// sha256(body+sourceDir). Pandoc cold start is ~50 ms; mdp watch
+// re-renders on every save, so identical fences in unchanged docs would
+// otherwise re-shell pandoc on every keystroke. With caching, only
+// truly new/edited fences pay the subprocess cost.
+//
+// Sized for typical doc sizes; rendering processes are short-lived
+// enough that we accept unbounded growth in `mdp serve`/`watch` and
+// trust the OS to reclaim on exit.
+var fenceCache sync.Map // map[[32]byte]string
+
+// emitLatexFence renders the fence body through pandoc and writes the
+// result as <div class="latex-block">…</div>. On render error the body
+// is replaced with a <div class="latex-error">…</div> so the failure is
+// visible in the preview rather than swallowed.
+func (d *dataLineRenderer) emitLatexFence(w util.BufWriter, source []byte, n *ast.FencedCodeBlock) {
+	var body bytes.Buffer
+	for i := 0; i < n.Lines().Len(); i++ {
+		line := n.Lines().At(i)
+		body.Write(line.Value(source))
+	}
+
+	key := sha256.Sum256(append([]byte(d.sourceDir+"\x00"), body.Bytes()...))
+	var out string
+	if cached, ok := fenceCache.Load(key); ok {
+		out = cached.(string)
+	} else {
+		rendered, err := latex.Render(context.Background(), body.Bytes(), latex.Options{
+			SourceDir: d.sourceDir,
+		})
+		if err != nil {
+			_, _ = w.WriteString(`<div class="latex-error"`)
+			writeDataLineAttr(w, n)
+			_, _ = w.WriteString(`>LaTeX render error: `)
+			_, _ = w.WriteString(gohtml.EscapeString(err.Error()))
+			_, _ = w.WriteString("</div>\n")
+			return
+		}
+		out = rendered
+		fenceCache.Store(key, out)
+	}
+
+	_, _ = w.WriteString(`<div class="latex-block"`)
+	writeDataLineAttr(w, n)
+	_, _ = w.WriteString(`>`)
+	_, _ = w.WriteString(out)
+	_, _ = w.WriteString("</div>\n")
 }
 
 func (d *dataLineRenderer) renderCodeBlock(w util.BufWriter, source []byte, n ast.Node, entering bool) (ast.WalkStatus, error) {
@@ -259,8 +343,10 @@ func annotateLines(doc ast.Node, source []byte) {
 }
 
 // renderHTML parses the markdown source and renders it with line annotations.
-func renderHTML(source []byte) string {
-	md := newMarkdown()
+// sourceDir is threaded into fenced LaTeX rendering so \input{} resolves
+// relative to the source file's directory.
+func renderHTML(source []byte, sourceDir string) string {
+	md := newMarkdown(sourceDir)
 	reader := text.NewReader(source)
 	doc := md.Parser().Parse(reader, parser.WithContext(parser.NewContext()))
 	annotateLines(doc, source)
@@ -277,17 +363,52 @@ func renderHTML(source []byte) string {
 //
 // On read error, it returns an HTML <p>Error reading file: ...</p> body and
 // a non-nil error so callers can decide whether to surface the failure.
-func RenderBody(filepath string) (string, error) {
-	content, err := os.ReadFile(filepath)
+//
+// File extension dispatches the renderer: .tex / .latex go through
+// pandoc (internal/render/latex); everything else uses goldmark.
+func RenderBody(path string) (string, error) {
+	content, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Sprintf("<p>Error reading file: %s</p>", gohtml.EscapeString(err.Error())), err
 	}
-	return RenderBytes(content), nil
+	sourceDir := filepath.Dir(path)
+	if isLatexPath(path) {
+		body, err := latex.Render(context.Background(), content, latex.Options{
+			SourceDir: sourceDir,
+		})
+		if err != nil {
+			return latexErrorBody(err), err
+		}
+		return body, nil
+	}
+	stripped := stripFrontmatter(string(content))
+	return renderHTML([]byte(stripped), sourceDir), nil
+}
+
+// latexErrorBody renders an HTML fragment for a LaTeX render error.
+// ErrPandocNotFound is surfaced with an install hint so users on a
+// pristine box know exactly what to do.
+func latexErrorBody(err error) string {
+	if errors.Is(err, latex.ErrPandocNotFound) {
+		return `<p>LaTeX preview requires <code>pandoc</code>. Install with ` +
+			`<code>apt install pandoc</code> or <code>brew install pandoc</code>.</p>`
+	}
+	return fmt.Sprintf("<p>LaTeX render error: %s</p>", gohtml.EscapeString(err.Error()))
+}
+
+// isLatexPath matches .tex / .latex case-insensitively.
+func isLatexPath(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".tex", ".latex":
+		return true
+	}
+	return false
 }
 
 // RenderBytes is RenderBody for already-loaded content. Useful for tests and
-// in-memory callers.
+// in-memory callers. The fenced-LaTeX intercept won't be able to resolve
+// \input{} relative paths since the caller didn't supply a sourceDir.
 func RenderBytes(content []byte) string {
 	stripped := stripFrontmatter(string(content))
-	return renderHTML([]byte(stripped))
+	return renderHTML([]byte(stripped), "")
 }

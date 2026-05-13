@@ -2,6 +2,7 @@ package render
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -161,6 +162,109 @@ func TestRenderFencedCode(t *testing.T) {
 	}
 	if !strings.Contains(out, `data-line="1"`) {
 		t.Errorf(`expected data-line="1" on fenced code: %q`, out)
+	}
+}
+
+func TestRenderFencedLatex_RoutedThroughPandoc(t *testing.T) {
+	if _, err := exec.LookPath("pandoc"); err != nil {
+		t.Skip("pandoc not on PATH; skipping")
+	}
+	src := "Prose.\n\n```latex\n\\section{Hello}\nWith \\emph{emphasis}.\n```\n\nAfter.\n"
+	out := RenderBytes([]byte(src))
+	if !strings.Contains(out, `class="latex-block"`) {
+		t.Errorf("expected latex-block wrapper, got: %q", out)
+	}
+	if !strings.Contains(out, `<em>emphasis</em>`) {
+		t.Errorf("expected pandoc-rendered <em> in output, got: %q", out)
+	}
+	// The fence must not be rendered as a code block when language is latex.
+	if strings.Contains(out, `class="language-latex"`) {
+		t.Errorf("latex fence was rendered as code block, not pandoc-routed")
+	}
+}
+
+func TestRenderFencedTex_AlsoRouted(t *testing.T) {
+	if _, err := exec.LookPath("pandoc"); err != nil {
+		t.Skip("pandoc not on PATH; skipping")
+	}
+	src := "```tex\n\\textbf{bold}\n```\n"
+	out := RenderBytes([]byte(src))
+	if !strings.Contains(out, `<strong>bold</strong>`) {
+		t.Errorf("expected pandoc-rendered <strong>, got: %q", out)
+	}
+}
+
+func TestRenderFencedNonLatex_StaysAsCodeBlock(t *testing.T) {
+	src := "```python\nprint('hi')\n```\n"
+	out := RenderBytes([]byte(src))
+	if !strings.Contains(out, `class="language-python"`) {
+		t.Errorf("non-latex fence should stay a code block, got: %q", out)
+	}
+	if strings.Contains(out, `class="latex-block"`) {
+		t.Errorf("python fence got latex-routed, output: %q", out)
+	}
+}
+
+func TestRenderBody_DispatchesTexExtension(t *testing.T) {
+	if _, err := exec.LookPath("pandoc"); err != nil {
+		t.Skip("pandoc not on PATH; skipping")
+	}
+	tmp := t.TempDir()
+	path := tmp + "/sample.tex"
+	if err := os.WriteFile(path, []byte(`\section{From tex}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := RenderBody(path)
+	if err != nil {
+		t.Fatalf("RenderBody: %v", err)
+	}
+	if !strings.Contains(out, `From tex`) {
+		t.Errorf("expected pandoc-rendered heading, got: %q", out)
+	}
+	if strings.Contains(out, `<pre>`) {
+		t.Errorf(".tex should not render as preformatted text, got: %q", out)
+	}
+}
+
+func TestRenderFencedLatex_DataLinePreserved(t *testing.T) {
+	if _, err := exec.LookPath("pandoc"); err != nil {
+		t.Skip("pandoc not on PATH; skipping")
+	}
+	// The fenced block opens on line 3 (1-indexed). data-line must
+	// stamp the latex-block div with that line so scroll-sync still
+	// targets the right paragraph.
+	src := "prose\n\n```latex\n\\section{X}\n```\n"
+	out := RenderBytes([]byte(src))
+	if !strings.Contains(out, `class="latex-block"`) {
+		t.Fatalf("expected latex-block wrapper: %q", out)
+	}
+	if !strings.Contains(out, `data-line="3"`) {
+		t.Errorf(`expected data-line="3" on latex-block, got: %q`, out)
+	}
+}
+
+func TestRenderBody_PandocMissingShowsInstallHint(t *testing.T) {
+	tmp := t.TempDir()
+	path := tmp + "/sample.tex"
+	if err := os.WriteFile(path, []byte(`\section{X}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Stub PATH so pandoc lookup fails: latex.Render returns
+	// ErrPandocNotFound, which latexErrorBody must replace with an
+	// install hint instead of dumping the raw err.Error().
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", tmp) // tmp has no pandoc binary
+	defer os.Setenv("PATH", origPath)
+
+	body, err := RenderBody(path)
+	if err == nil {
+		t.Fatalf("expected error when pandoc missing")
+	}
+	if !strings.Contains(body, "apt install pandoc") {
+		t.Errorf("expected install hint in body, got: %q", body)
+	}
+	if strings.Contains(body, "ErrPandocNotFound") {
+		t.Errorf("raw sentinel name leaked into user-facing body: %q", body)
 	}
 }
 

@@ -125,11 +125,14 @@ func TestHandler_PostRender_SwitchesFile(t *testing.T) {
 	}
 	page, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if !strings.Contains(string(page), "Second") {
-		t.Errorf("page missing 'Second' after switch: %s", page)
+	// Check for the rendered heading specifically (not just the
+	// substring) because bundled JS/CSS assets in the page contain the
+	// words "First" and "Second" in unrelated string literals.
+	if !strings.Contains(string(page), `>Second</h1>`) {
+		t.Errorf("page missing rendered Second heading after switch")
 	}
-	if strings.Contains(string(page), "First") {
-		t.Errorf("page still contains 'First' after switch")
+	if strings.Contains(string(page), `>First</h1>`) {
+		t.Errorf("page still contains rendered First heading after switch")
 	}
 }
 
