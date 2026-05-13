@@ -13,13 +13,17 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/aldevv/md-preview/internal/config"
 	"github.com/aldevv/md-preview/internal/nativewin"
@@ -372,33 +376,42 @@ func spawnDetached(argv []string) error {
 	return cmd.Start()
 }
 
-// runStaticLatex writes the LaTeX bundle's sibling assets and a
-// per-preview HTML to the user cache dir, then opens a native window
-// using a custom mdp:// URI scheme so the wasm + JS sidecars come
-// through with the right Content-Type (file:// gives wrong MIME on
-// .wasm in WebKitGTK, defeating streaming compile). Falls back to a
-// browser launch with file:// when the native libs aren't available.
+// runStaticLatex writes a per-preview HTML to the user cache dir and
+// opens a native window. The child spawns an ephemeral 127.0.0.1
+// HTTP server so WebKit gets the right Content-Type + a real origin,
+// which enables streaming compile and JSC's wasm code cache. The
+// gzip decompress runs in a background goroutine, overlapping with
+// the page build + HTML write.
 func runStaticLatex(src, body, theme string, cfg config.Config, env Environment, stderr io.Writer) int {
 	cacheBase, err := mdpCacheDir()
 	if err != nil {
 		fmt.Fprintf(stderr, "mdp: cache dir: %v\n", err)
 		return 1
 	}
-	assetsDir, err := latex.WriteSiblingAssets(cacheBase)
-	if err != nil {
-		fmt.Fprintf(stderr, "mdp: writing latex assets: %v\n", err)
+	type assetsResult struct {
+		dir string
+		err error
+	}
+	assetsCh := make(chan assetsResult, 1)
+	go func() {
+		dir, err := latex.WriteSiblingAssets(cacheBase)
+		assetsCh <- assetsResult{dir, err}
+	}()
+	page := render.BuildPageWithAssets(body, theme, 0, config.ExtraCSS(cfg, stderr), cfg.Colemak, "./")
+	r := <-assetsCh
+	if r.err != nil {
+		fmt.Fprintf(stderr, "mdp: writing latex assets: %v\n", r.err)
 		return 1
 	}
-	page := render.BuildPageWithAssets(body, theme, 0, config.ExtraCSS(cfg, stderr), cfg.Colemak, "./")
 	htmlBase := htmlBasename(src)
-	htmlPath := filepath.Join(assetsDir, htmlBase)
+	htmlPath := filepath.Join(r.dir, htmlBase)
 	if err := writeTmpFile(htmlPath, []byte(page)); err != nil {
 		fmt.Fprintf(stderr, "mdp: writing html: %v\n", err)
 		return 1
 	}
 	if nativewin.Available() {
 		if exe, err := env.Executable(); err == nil {
-			if err := env.Spawn([]string{exe, "_open-window", assetsDir, "mdp:///" + htmlBase}); err == nil {
+			if err := env.Spawn([]string{exe, "_open-window", r.dir, htmlBase}); err == nil {
 				return 0
 			}
 		}
@@ -434,22 +447,78 @@ func htmlBasename(src string) string {
 	return "mdp-" + hex.EncodeToString(sum[:])[:12] + ".html"
 }
 
-// runOpenWindow is the child-process entry point for the detached
-// native-window host. Args: <assetsDir> <url>. Registers the mdp://
-// scheme to serve from assetsDir, then blocks on gtk_main.
+// runOpenWindow is the child entry: args <assetsDir> <htmlBase>.
+// Spins up a 127.0.0.1 HTTP server serving the assets dir with
+// Cache-Control: immutable on wasm + JS, then opens the native
+// window at http://127.0.0.1:PORT/<htmlBase>. http origin unlocks
+// streaming compile + WebKit's wasm code cache. The port is
+// persisted in the cache dir so the IDB origin stays stable across
+// runs (otherwise every launch is a new origin, never a cache hit).
+// Server lives only for the window's lifetime.
 func runOpenWindow(args []string, stderr io.Writer, _ Environment) int {
 	if len(args) < 2 {
 		return 1
 	}
-	if err := nativewin.Open(nativewin.Options{
-		URL:       args[1],
-		AssetsDir: args[0],
-		Title:     "mdp",
-	}); err != nil {
+	assetsDir, htmlBase := args[0], args[1]
+	cacheBase, _ := mdpCacheDir()
+	ln, err := listenStable(cacheBase)
+	if err != nil {
+		fmt.Fprintf(stderr, "mdp: listen: %v\n", err)
+		return 1
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	srv := &http.Server{Handler: latexAssetServer(assetsDir), ReadHeaderTimeout: 5 * time.Second}
+	go func() { _ = srv.Serve(ln) }()
+	defer srv.Close()
+	url := fmt.Sprintf("http://127.0.0.1:%d/%s", port, htmlBase)
+	if err := nativewin.Open(nativewin.Options{URL: url, Title: "mdp"}); err != nil {
 		fmt.Fprintf(stderr, "mdp: open-window: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+// listenStable tries the port persisted in cacheBase/port first so
+// the http://127.0.0.1:PORT IDB origin stays the same across runs.
+// Falls back to a fresh ephemeral port (and persists it) when the
+// previous one is in use.
+func listenStable(cacheBase string) (net.Listener, error) {
+	portFile := filepath.Join(cacheBase, "port")
+	if data, err := os.ReadFile(portFile); err == nil {
+		if p, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && p > 0 {
+			if ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p)); err == nil {
+				return ln, nil
+			}
+		}
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	p := ln.Addr().(*net.TCPAddr).Port
+	_ = os.WriteFile(portFile, []byte(strconv.Itoa(p)), 0o644)
+	return ln, nil
+}
+
+func latexAssetServer(dir string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rel := strings.TrimPrefix(r.URL.Path, "/")
+		if rel == "" || strings.Contains(rel, "..") {
+			http.NotFound(w, r)
+			return
+		}
+		switch {
+		case strings.HasSuffix(rel, ".wasm"):
+			w.Header().Set("Content-Type", "application/wasm")
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		case strings.HasSuffix(rel, ".js"):
+			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		case strings.HasSuffix(rel, ".css"):
+			w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		}
+		http.ServeFile(w, r, filepath.Join(dir, rel))
+	})
 }
 
 // runWatchSubcommand handles `mdp watch [-t theme] [file]`. Picks a file

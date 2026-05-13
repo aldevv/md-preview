@@ -69,18 +69,22 @@ async function _mdpLoadWasmModule(url) {
     const cached = await _mdpIdbGet(db, key).catch(() => null);
     if (cached instanceof WebAssembly.Module) return cached;
   }
-  // Use arrayBuffer + compile uniformly: WebKitGTK's wasm MIME check
-  // rejects compileStreaming on file:// (wrong MIME) and mdp://
-  // (Content-Type from the scheme handler doesn't propagate). The
-  // buffer path has no MIME check and works on every protocol.
   let mod;
   try {
     mod = await WebAssembly.compileStreaming(fetch(url));
-  } catch (_) {
+  } catch (e) {
+    console.warn("[mdp] compileStreaming failed, falling back to buffer:", e);
     const buf = await (await fetch(url)).arrayBuffer();
     mod = await WebAssembly.compile(buf);
   }
-  if (db && key) _mdpIdbPut(db, key, mod).catch(() => {});
+  if (db && key) {
+    try {
+      await _mdpIdbPut(db, key, mod);
+      console.log("[mdp] cached wasm Module to IDB:", key);
+    } catch (e) {
+      console.warn("[mdp] IDB put failed (Module not structured-cloneable here):", e);
+    }
+  }
   return mod;
 }
 

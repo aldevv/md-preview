@@ -54,10 +54,12 @@ async function renderOne(node) {
 async function mdpRenderLatex(root) {
   const nodes = (root || document).querySelectorAll(".latex-pending");
   if (!nodes.length) return;
+  const t0 = performance.now();
   for (const node of nodes) {
     await renderOne(node);
   }
   if (typeof window.mdpRenderMath === "function") window.mdpRenderMath();
+  document.title = "mdp DONE " + Math.round(performance.now() - t0) + "ms";
 }
 
 window.mdpRenderLatex = mdpRenderLatex;
