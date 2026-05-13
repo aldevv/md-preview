@@ -42,9 +42,6 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      # pandoc lets the LaTeX renderer tests actually run instead of
-      # skipping silently. The sandbox + sanitizer regression tests
-      # depend on it.
-      - name: install pandoc
-        run: sudo apt-get update && sudo apt-get install -y pandoc
+      # pandoc.wasm is committed at internal/render/latex/wasm/ so
+      # `go test` / `go install` work without a separate fetch step.
       - run: go test ./...

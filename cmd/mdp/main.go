@@ -23,6 +23,7 @@ import (
 
 	"github.com/aldevv/md-preview/internal/config"
 	"github.com/aldevv/md-preview/internal/render"
+	"github.com/aldevv/md-preview/internal/render/latex"
 	"github.com/aldevv/md-preview/internal/server"
 )
 
@@ -245,6 +246,22 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 	if err != nil {
 		fmt.Fprintf(stderr, "mdp: %v\n", err)
 	}
+
+	// file:// origins can't fetch the WASM bundle the client-side
+	// LaTeX renderer needs (browsers gate WebAssembly.instantiate
+	// streaming on http(s):// schemes and CORS-safe MIME types).
+	// When the body needs LaTeX, escalate to the same one-shot HTTP
+	// server `mdp watch` uses — minus the auto-watch loop, since
+	// static mode is a one-render preview.
+	if latex.HasLatex(body) {
+		if printPath {
+			fmt.Fprintln(stderr, "mdp: -p/--print is not supported for LaTeX previews (needs a live server for pandoc.wasm)")
+			return 1
+		}
+		fmt.Fprintln(stderr, "mdp: LaTeX detected; starting preview server (Ctrl-C to exit)")
+		return runStaticServer(src, theme, cfg, env, stderr)
+	}
+
 	page := render.BuildPage(body, theme, 0, config.ExtraCSS(cfg, stderr), cfg.Colemak)
 
 	tmpPath := tmpHTMLPath(env.TempDir(), src)
@@ -341,6 +358,35 @@ func spawnDetached(argv []string) error {
 	cmd.Stdin = nil
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	return cmd.Start()
+}
+
+// runStaticServer is the auto-promotion path for static-mode previews
+// that contain LaTeX. file:// URLs can't fetch pandoc.wasm, so when
+// the rendered body has a latex-pending placeholder we run the same
+// HTTP server `mdp watch` uses (watcher included so editor reloads
+// keep working) and block until the user Ctrl-Cs. The non-LaTeX
+// static path still goes through the original write-tmp-and-open
+// flow.
+func runStaticServer(src, theme string, cfg config.Config, env Environment, stderr io.Writer) int {
+	opts := server.Options{
+		File:    src,
+		Port:    0,
+		Theme:   theme,
+		Colemak: cfg.Colemak,
+		Watch:   true,
+		OnListen: func(port int) {
+			url := fmt.Sprintf("http://localhost:%d/", port)
+			argv := config.BrowserCmd(cfg.Browser, url, env.LookPath, env.GOOS, stderr)
+			if err := env.Spawn(argv); err != nil {
+				fmt.Fprintf(stderr, "mdp: launching browser: %v\n", err)
+			}
+		},
+	}
+	if err := env.RunServer(opts); err != nil {
+		fmt.Fprintf(stderr, "mdp: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 // runWatchSubcommand handles `mdp watch [-t theme] [file]`. Picks a file

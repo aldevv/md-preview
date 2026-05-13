@@ -61,6 +61,7 @@ mdp -e README.md               # preview AND open the file in nvim
 mdp -e                         # fzf-pick, preview, and edit
 mdp -t light README.md         # light theme
 mdp -p README.md               # print HTML path, don't open browser
+mdp foo.tex                    # render LaTeX (auto-starts a preview server)
 mdp serve README.md 8080 dark  # plugin server mode (used by md-preview.nvim)
 mdp help                       # show help
 ```
@@ -81,6 +82,14 @@ closes with it (chrome `--app=` mode) or shows a "server stopped" notice.
 | Close             | `q`       | `q`       |
 
 Enable Colemak with `colemak = true` in the [config](#config).
+
+### LaTeX
+
+mdp renders `.tex` / `.latex` files and ` ```latex ` fenced blocks inside markdown. The Pandoc 3.9 wasm32-wasi build is bundled into the binary; the browser runs it via `@bjorn3/browser_wasi_shim`, no external `pandoc` install required. Output is DOMPurify-sanitized before injection.
+
+Because the browser needs to load the WASM bundle, LaTeX previews always run through the auto-reload HTTP server — `mdp foo.tex` is equivalent to `mdp watch foo.tex` and stays running until Ctrl-C. Static-mode (`-p` print path) is not available for LaTeX content; use `mdp watch` instead.
+
+Coverage matches Pandoc: sectioning, lists, refs, tables, common math, citations. TikZ/PGFPlots are dropped (no real TeX engine), `\input{}` across multiple files isn't resolved (the WASM filesystem is in-memory), and editor scroll-sync inside `.tex` previews is deferred. See [`docs/latex.md`](docs/latex.md) for the full design.
 
 ### Notes
 
@@ -129,10 +138,13 @@ The skill loads its mdp-driving reference from the binary itself via `mdp skill 
 Issues and PRs welcome at [github.com/aldevv/md-preview/issues](https://github.com/aldevv/md-preview/issues).
 
 ```sh
-make test     # go test ./...
-make build    # produces ./mdp
-make install  # go install ./cmd/mdp
+make test         # go test ./...
+make build        # produces ./mdp
+make install      # go install ./cmd/mdp
+make pandoc-wasm  # refresh the embedded pandoc.wasm (only when bumping PANDOC_WASM_VERSION)
 ```
+
+The repo ships `internal/render/latex/wasm/pandoc.wasm` (58 MB) so that `go install github.com/aldevv/md-preview/cmd/mdp@latest` builds cleanly without a separate fetch step. To upgrade it, bump `PANDOC_WASM_VERSION` in the Makefile, run `make pandoc-wasm`, then commit the new `pandoc.wasm` + `pandoc.wasm.sha256` together.
 
 ## License
 

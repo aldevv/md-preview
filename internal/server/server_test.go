@@ -306,6 +306,181 @@ func TestHandler_PostRender_RejectsPathOutsideServedDir(t *testing.T) {
 	}
 }
 
+func TestHandler_LatexAsset_PandocWasm(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	s := newTestState(t, file)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/_/pandoc.wasm")
+	if err != nil {
+		t.Fatalf("GET /_/pandoc.wasm: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/wasm" {
+		t.Errorf("Content-Type = %q, want application/wasm "+
+			"(WebAssembly.instantiateStreaming rejects other MIMEs)", ct)
+	}
+	first8 := make([]byte, 8)
+	if _, err := io.ReadFull(resp.Body, first8); err != nil {
+		t.Fatalf("read first 8 bytes: %v", err)
+	}
+	// WASM magic: \0asm\1\0\0\0. http.Client decodes gzip transparently
+	// when Accept-Encoding wasn't manually set, so the body the test
+	// sees is the decompressed wasm regardless of wire encoding.
+	if string(first8[:4]) != "\x00asm" {
+		t.Errorf("body does not start with WASM magic; got %x", first8[:4])
+	}
+}
+
+func TestHandler_LatexAsset_PandocWasm_GzipWire(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	s := newTestState(t, file)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	// Send our own Accept-Encoding to disable http.Client's
+	// auto-decompression — we want to inspect the wire encoding
+	// to confirm pandoc.wasm is actually shipped gzipped (the
+	// whole point of the .gz embed trick, ~42 MB saved on disk).
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/_/pandoc.wasm", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /_/pandoc.wasm: %v", err)
+	}
+	defer resp.Body.Close()
+	if ce := resp.Header.Get("Content-Encoding"); ce != "gzip" {
+		t.Errorf("Content-Encoding = %q, want gzip", ce)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/wasm" {
+		t.Errorf("Content-Type = %q, want application/wasm even with gzip CE", ct)
+	}
+	if v := resp.Header.Get("Vary"); !strings.Contains(v, "Accept-Encoding") {
+		t.Errorf("Vary = %q, want Accept-Encoding", v)
+	}
+	first2 := make([]byte, 2)
+	if _, err := io.ReadFull(resp.Body, first2); err != nil {
+		t.Fatalf("read first 2 bytes: %v", err)
+	}
+	// gzip magic: 0x1f 0x8b
+	if first2[0] != 0x1f || first2[1] != 0x8b {
+		t.Errorf("body does not start with gzip magic; got %x", first2)
+	}
+}
+
+func TestHandler_LatexAsset_JSandCSS(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	s := newTestState(t, file)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	cases := []struct {
+		path string
+		ct   string
+		want string
+	}{
+		{"/_/pandoc.js", "text/javascript; charset=utf-8", "export async function convert"},
+		{"/_/wasi-shim.js", "text/javascript; charset=utf-8", "WASI"},
+		{"/_/latex-render.js", "text/javascript; charset=utf-8", "mdpRenderLatex"},
+		{"/_/purify.min.js", "text/javascript; charset=utf-8", "DOMPurify"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			resp, err := http.Get(srv.URL + tc.path)
+			if err != nil {
+				t.Fatalf("GET %s: %v", tc.path, err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", resp.StatusCode)
+			}
+			if ct := resp.Header.Get("Content-Type"); ct != tc.ct {
+				t.Errorf("Content-Type = %q, want %q", ct, tc.ct)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			if !strings.Contains(string(body), tc.want) {
+				t.Errorf("body missing %q in %s", tc.want, tc.path)
+			}
+		})
+	}
+}
+
+func TestHandler_LatexAsset_RejectsTraversal(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	s := newTestState(t, file)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	// Containment matters here: /_/ is a public path under the
+	// loopback origin. A leak via ../ would let a malicious page
+	// trick the browser into reading anywhere the embedded FS reaches.
+	for _, p := range []string{"/_/../server.go", "/_/..%2Fserver.go", "/_/"} {
+		resp, err := http.Get(srv.URL + p)
+		if err != nil {
+			t.Fatalf("GET %s: %v", p, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			t.Errorf("path %s returned 200; expected non-200", p)
+		}
+	}
+}
+
+func TestHandler_LatexPage_WiresUpScripts(t *testing.T) {
+	dir := t.TempDir()
+	// A .md with a fenced LaTeX block must include the latex-pending
+	// placeholder in the body AND the script tags for pandoc.wasm
+	// glue + DOMPurify. Math-free .md pages must skip both.
+	file := writeMD(t, dir, "doc.md", "prose\n\n```latex\n\\section{X}\n```\n")
+	s := newTestState(t, file)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	for _, want := range []string{
+		`class="latex-pending"`,
+		`/_/purify.min.js`,
+		`/_/latex-render.js`,
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("page missing %q", want)
+		}
+	}
+}
+
+func TestHandler_NoLatex_NoWasmScripts(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	s := newTestState(t, file)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	for _, want := range []string{`/_/pandoc.js`, `/_/latex-render.js`, `/_/purify.min.js`} {
+		if strings.Contains(string(body), want) {
+			t.Errorf("page should not reference %s for math-free markdown", want)
+		}
+	}
+}
+
 func TestHandler_PostRender_RejectsBodyTooLarge(t *testing.T) {
 	dir := t.TempDir()
 	file := writeMD(t, dir, "doc.md", "# Hello\n")

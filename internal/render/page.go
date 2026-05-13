@@ -3,6 +3,8 @@ package render
 import (
 	"fmt"
 	"strings"
+
+	"github.com/aldevv/md-preview/internal/render/latex"
 )
 
 // CSSDark holds the dark theme CSS custom properties.
@@ -219,6 +221,12 @@ ws.onmessage = (e) => {
                 doc.querySelector('#content').innerHTML;
             hljs.highlightAll();
             mdpRenderMath();
+            // Drive pandoc.wasm over any latex-pending blocks the
+            // refreshed body introduced; harmless no-op when none exist
+            // or when the renderer module hasn't loaded yet.
+            if (typeof window.mdpRenderLatex === 'function') {
+                window.mdpRenderLatex(document);
+            }
             cacheEls();
         });
     }
@@ -270,12 +278,25 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool) st
 		katexAutoRenderJSOut = katexAutoRenderScript
 	}
 
+	// Bundle pandoc.wasm + glue scripts only when the rendered body
+	// has at least one latex-pending placeholder. pandoc.wasm is
+	// ~58 MB raw / ~15 MB gzipped; pulling it in for every preview
+	// would inflate first-paint time for the math-free common case.
+	// The CSS is appended unconditionally — a few hundred bytes — so
+	// .latex-block / .latex-error / .latex-pending styles are
+	// available even if the user toggles content via WS reload.
+	latexScripts := ""
+	if latex.HasLatex(body) {
+		latexScripts = latexScriptTags
+	}
+
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
+%s
 %s
 %s
 %s
@@ -304,13 +325,50 @@ function mdpRenderMath() {
     throwOnError: false
   });
 }
+window.mdpRenderMath = mdpRenderMath;
 mdpRenderMath();
 %s
 %s
 </script>
+%s
 </body>
-</html>`, hljsThemeCSS, cssVars, CSSCommon, katexCSSOut, extraCSS, body, hljsScript, katexJSOut, katexAutoRenderJSOut, vimKeys(colemak), wsScript)
+</html>`, hljsThemeCSS, cssVars, CSSCommon, latexCSS, katexCSSOut, extraCSS, body, hljsScript, katexJSOut, katexAutoRenderJSOut, vimKeys(colemak), wsScript, latexScripts)
 }
+
+// latexCSS styles the three states the placeholder cycles through:
+// pending (server emitted, WASM hasn't rendered yet), block (success),
+// error (pandoc-wasm threw). Bundled unconditionally since it's tiny.
+const latexCSS = `
+.markdown-body .latex-pending {
+  color: var(--color-text-secondary);
+  font-style: italic;
+  padding: 1em;
+  border: 1px dashed var(--color-border);
+  border-radius: 6px;
+  margin-bottom: 1em;
+}
+.markdown-body .latex-block { margin-bottom: 1em; }
+.markdown-body .latex-error {
+  color: var(--color-alert-caution);
+  background: var(--color-bg-code);
+  padding: 8px 12px;
+  border-left: 4px solid var(--color-alert-caution);
+  border-radius: 4px;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 90%;
+  margin-bottom: 1em;
+  white-space: pre-wrap;
+}
+`
+
+// latexScriptTags wires DOMPurify (synchronous so window.DOMPurify
+// is set before the module runs) followed by the ES-module renderer.
+// purify.min.js is a UMD bundle, latex-render.js is the only
+// type="module" entry — it transitively pulls pandoc.js and
+// wasi-shim.js via local imports.
+const latexScriptTags = `<script src="/_/purify.min.js"></script>
+<script type="module" src="/_/latex-render.js"></script>
+`
 
 // hasMath checks whether the rendered body has any math markers worth
 // loading KaTeX for. Detection is cheap (substring scan) and only needs
@@ -321,11 +379,16 @@ mdpRenderMath();
 // auto-render isn't configured for them (prose like `Costs $5 and $10`
 // produced too many false positives), so a body whose only math marker
 // is a bare `$` won't render either way.
+//
+// A latex-pending placeholder triggers the bundle too: pandoc.wasm's
+// --mathjax output stamps the same \(...\) / \[...\] markers KaTeX's
+// auto-render scans for, and latex-render.js re-runs mdpRenderMath()
+// over the swapped-in HTML.
 func hasMath(body string) bool {
 	for _, marker := range []string{
 		`\(`, `\[`, `$$`,
 		`class="math inline"`, `class="math display"`,
-		`class="latex-block"`, `class="latex-error"`,
+		`class="latex-pending"`,
 	} {
 		if strings.Contains(body, marker) {
 			return true

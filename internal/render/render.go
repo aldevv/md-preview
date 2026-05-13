@@ -4,9 +4,6 @@ package render
 
 import (
 	"bytes"
-	"context"
-	"crypto/sha256"
-	"errors"
 	"fmt"
 	gohtml "html"
 	"os"
@@ -14,7 +11,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/aldevv/md-preview/internal/render/latex"
 	"github.com/yuin/goldmark"
@@ -144,53 +140,31 @@ func isLatexLang(language []byte) bool {
 	return false
 }
 
-// fenceCache memoizes pandoc invocations for fenced LaTeX blocks by
-// sha256(body+sourceDir). Pandoc cold start is ~50 ms; mdp watch
-// re-renders on every save, so identical fences in unchanged docs would
-// otherwise re-shell pandoc on every keystroke. With caching, only
-// truly new/edited fences pay the subprocess cost.
+// emitLatexFence writes a <div class="latex-pending"> placeholder
+// carrying the base64-encoded fence body. The page's latex-render.js
+// hands the source to pandoc.wasm and replaces the placeholder with
+// sanitized HTML once the WASM module finishes initializing.
 //
-// Sized for typical doc sizes; rendering processes are short-lived
-// enough that we accept unbounded growth in `mdp serve`/`watch` and
-// trust the OS to reclaim on exit.
-var fenceCache sync.Map // map[[32]byte]string
-
-// emitLatexFence renders the fence body through pandoc and writes the
-// result as <div class="latex-block">…</div>. On render error the body
-// is replaced with a <div class="latex-error">…</div> so the failure is
-// visible in the preview rather than swallowed.
+// No server-side render-error path: pandoc.wasm runs in the browser,
+// so failures surface client-side (latex-render.js swaps the
+// placeholder for a .latex-error div on convert() throwing).
 func (d *dataLineRenderer) emitLatexFence(w util.BufWriter, source []byte, n *ast.FencedCodeBlock) {
 	var body bytes.Buffer
 	for i := 0; i < n.Lines().Len(); i++ {
 		line := n.Lines().At(i)
 		body.Write(line.Value(source))
 	}
-
-	key := sha256.Sum256(append([]byte(d.sourceDir+"\x00"), body.Bytes()...))
-	var out string
-	if cached, ok := fenceCache.Load(key); ok {
-		out = cached.(string)
-	} else {
-		rendered, err := latex.Render(context.Background(), body.Bytes(), latex.Options{
-			SourceDir: d.sourceDir,
-		})
-		if err != nil {
-			_, _ = w.WriteString(`<div class="latex-error"`)
-			writeDataLineAttr(w, n)
-			_, _ = w.WriteString(`>LaTeX render error: `)
-			_, _ = w.WriteString(gohtml.EscapeString(err.Error()))
-			_, _ = w.WriteString("</div>\n")
-			return
+	dataLine := ""
+	if v, ok := n.Attribute(dataLineAttr); ok {
+		switch typed := v.(type) {
+		case []byte:
+			dataLine = string(typed)
+		case string:
+			dataLine = typed
 		}
-		out = rendered
-		fenceCache.Store(key, out)
 	}
-
-	_, _ = w.WriteString(`<div class="latex-block"`)
-	writeDataLineAttr(w, n)
-	_, _ = w.WriteString(`>`)
-	_, _ = w.WriteString(out)
-	_, _ = w.WriteString("</div>\n")
+	_, _ = w.WriteString(latex.Placeholder(body.Bytes(), dataLine))
+	_ = w.WriteByte('\n')
 }
 
 func (d *dataLineRenderer) renderCodeBlock(w util.BufWriter, source []byte, n ast.Node, entering bool) (ast.WalkStatus, error) {
@@ -364,40 +338,26 @@ func renderHTML(source []byte, sourceDir string) string {
 // On read error, it returns an HTML <p>Error reading file: ...</p> body and
 // a non-nil error so callers can decide whether to surface the failure.
 //
-// File extension dispatches the renderer: .tex / .latex go through
-// pandoc (internal/render/latex); everything else uses goldmark.
+// File extension dispatches the renderer: .tex / .latex emit a single
+// latex-pending placeholder the browser-side renderer converts via
+// pandoc.wasm; everything else uses goldmark.
 func RenderBody(path string) (string, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Sprintf("<p>Error reading file: %s</p>", gohtml.EscapeString(err.Error())), err
 	}
-	sourceDir := filepath.Dir(path)
-	if isLatexPath(path) {
-		body, err := latex.Render(context.Background(), content, latex.Options{
-			SourceDir: sourceDir,
-		})
-		if err != nil {
-			return latexErrorBody(err), err
-		}
-		return body, nil
+	if IsLatexPath(path) {
+		return latex.Placeholder(content, ""), nil
 	}
+	sourceDir := filepath.Dir(path)
 	stripped := stripFrontmatter(string(content))
 	return renderHTML([]byte(stripped), sourceDir), nil
 }
 
-// latexErrorBody renders an HTML fragment for a LaTeX render error.
-// ErrPandocNotFound is surfaced with an install hint so users on a
-// pristine box know exactly what to do.
-func latexErrorBody(err error) string {
-	if errors.Is(err, latex.ErrPandocNotFound) {
-		return `<p>LaTeX preview requires <code>pandoc</code>. Install with ` +
-			`<code>apt install pandoc</code> or <code>brew install pandoc</code>.</p>`
-	}
-	return fmt.Sprintf("<p>LaTeX render error: %s</p>", gohtml.EscapeString(err.Error()))
-}
-
-// isLatexPath matches .tex / .latex case-insensitively.
-func isLatexPath(path string) bool {
+// IsLatexPath matches .tex / .latex case-insensitively. Exported so the
+// CLI can route LaTeX previews to the HTTP server path (file:// URLs
+// can't load the WASM bundle the client-side renderer needs).
+func IsLatexPath(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".tex", ".latex":
 		return true

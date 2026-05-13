@@ -1,174 +1,82 @@
-// Package latex renders LaTeX source to an HTML5 fragment by shelling
-// out to pandoc. mdp uses this for whole .tex files and for fenced
-// ```latex blocks embedded in markdown. Both paths funnel through
-// Render so the pandoc invocation, resource caps, and HTML sanitization
-// stay in one place.
+// Package latex emits client-side WASM placeholders for LaTeX content
+// in mdp's preview page and exposes the embedded pandoc-wasm bundle.
+//
+// The previous version of this package shelled out to a host-installed
+// pandoc binary. That worked but required users to install pandoc
+// separately. The current version ships pandoc's official wasm32-wasi
+// build inside the mdp binary; the browser executes it via @bjorn3's
+// WASI shim and DOMPurify-sanitizes the HTML before injection.
 package latex
 
 import (
-	"bytes"
-	"context"
-	"errors"
+	"embed"
+	"encoding/base64"
 	"fmt"
-	"io"
-	"os/exec"
+	gohtml "html"
+	"io/fs"
 	"strings"
-	"time"
-
-	"github.com/microcosm-cc/bluemonday"
 )
 
-// sanitizer drops dangerous attributes and elements from pandoc's HTML
-// output before it lands in the loopback-bound preview origin. Built
-// once at package init; bluemonday policies are safe to share across
-// goroutines.
-var sanitizer = func() *bluemonday.Policy {
-	p := bluemonday.UGCPolicy()
-	// KaTeX-style math wrappers carry class="math inline" / "math display".
-	// UGCPolicy already permits class on most elements, but be explicit
-	// so a future bluemonday default-change doesn't break math rendering.
-	p.AllowAttrs("class").OnElements("span", "div", "code", "pre")
-	return p
-}()
-
-// ErrPandocNotFound is returned when the pandoc binary cannot be
-// located on PATH (or at Options.PandocPath when set). Callers should
-// surface a "install pandoc via apt/brew" message to the user.
-var ErrPandocNotFound = errors.New("latex: pandoc not found on PATH")
-
-// ErrOutputTooLarge is returned when pandoc's HTML output exceeds the
-// configured cap. Likely culprits: pathological \input loops, huge
-// generated tables.
-var ErrOutputTooLarge = errors.New("latex: output exceeded size cap")
-
-const (
-	defaultTimeout = 5 * time.Second
-	defaultMaxSize = 20 * 1024 * 1024 // 20 MiB
-)
-
-// Options is the value form so call sites can construct partial
-// configurations without ceremony; defaults kick in on zero values.
-type Options struct {
-	// SourceDir is pandoc's working directory. \input{} and
-	// \includegraphics{} resolve relative paths from here. Empty means
-	// the caller's CWD.
-	SourceDir string
-
-	// Timeout bounds a single render. Zero falls back to defaultTimeout.
-	Timeout time.Duration
-
-	// PandocPath overrides the binary lookup. Empty means "pandoc" via
-	// PATH.
-	PandocPath string
-
-	// MaxOutputBytes caps the HTML output size. Zero falls back to
-	// defaultMaxSize.
-	MaxOutputBytes int
-
-	// Warnings, if non-nil, receives pandoc's stderr on successful
-	// renders. Pandoc emits useful diagnostics (missing macros, unsafe
-	// command rejected by --sandbox) here even on exit 0. Nil drops
-	// them silently.
-	Warnings io.Writer
-}
-
-// Render converts a LaTeX document to an HTML5 fragment.
+// AssetsFS holds pandoc.wasm.gz + the JS bridge + WASI shim + DOMPurify
+// + mdp's glue script. Sourced from internal/render/latex/wasm/.
 //
-// Math is emitted with \(...\) and \[...\] delimiters inside
-// <span class="math inline|display"> wrappers (the --mathjax pandoc
-// flag), matching what KaTeX's auto-render scans for.
-func Render(ctx context.Context, src []byte, opts Options) (string, error) {
-	bin := opts.PandocPath
-	if bin == "" {
-		bin = "pandoc"
-	}
-	if _, err := exec.LookPath(bin); err != nil {
-		return "", ErrPandocNotFound
-	}
+// pandoc.wasm.gz is the gzip -9'd Tweag/Pandoc WASM build (GPL-2.0+);
+// it's shipped as a static asset served with Content-Encoding: gzip
+// so the browser decodes on the fly via WebAssembly.instantiateStreaming.
+// Storing gzipped (~16 MB) instead of raw (~58 MB) saves ~42 MB in the
+// mdp binary at zero runtime cost (browsers transparently decode gzip
+// in streaming WASM instantiation).
+//
+// pandoc.js (MIT, Tweag) is the upstream interface module with one
+// local-import rewrite. wasi-shim.js is the jsdelivr ESM bundle of
+// @bjorn3/browser_wasi_shim (Apache-2.0/MIT). purify.min.js is
+// DOMPurify (Apache-2.0/MPL). latex-render.js is mdp's own glue.
+//
+//go:embed wasm
+var assets embed.FS
 
-	timeout := opts.Timeout
-	if timeout <= 0 {
-		timeout = defaultTimeout
-	}
-	maxSize := opts.MaxOutputBytes
-	if maxSize <= 0 {
-		maxSize = defaultMaxSize
-	}
-
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(runCtx, bin,
-		"--from=latex",
-		"--to=html5",
-		"--mathjax",
-		"--no-highlight",
-		// --sandbox blocks file IO from pandoc filters and \input{}, plus
-		// network fetches from \includegraphics{https://…}. Without it,
-		// \input{/etc/passwd} silently reads any user-readable file and
-		// inlines it into the loopback-bound preview, which would be an
-		// exfiltration primitive when paired with any XSS path. Pandoc
-		// >= 2.15.
-		"--sandbox",
-	)
-	cmd.Dir = opts.SourceDir
-	cmd.Stdin = bytes.NewReader(src)
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	lw := &limitWriter{w: &stdout, remaining: maxSize}
-	cmd.Stdout = lw
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
+// AssetsFS returns the embedded asset tree rooted at "wasm/" so the
+// server can serve every file via http.StripPrefix("/_/").
+func AssetsFS() fs.FS {
+	sub, err := fs.Sub(assets, "wasm")
 	if err != nil {
-		if errors.Is(ctx.Err(), context.Canceled) {
-			return "", ctx.Err()
-		}
-		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-			return "", fmt.Errorf("latex: pandoc timed out after %s", timeout)
-		}
-		if msg := strings.TrimSpace(stderr.String()); msg != "" {
-			return "", fmt.Errorf("latex: pandoc failed: %s", msg)
-		}
-		return "", fmt.Errorf("latex: pandoc failed: %w", err)
+		// fs.Sub only errors on a malformed path, which is a compile-time
+		// constant here; panic so a build issue fails loudly rather than
+		// silently dropping LaTeX support at runtime.
+		panic(fmt.Errorf("latex: embed sub: %w", err))
 	}
-	if lw.exceeded {
-		return "", ErrOutputTooLarge
-	}
-	if opts.Warnings != nil && stderr.Len() > 0 {
-		_, _ = opts.Warnings.Write(stderr.Bytes())
-	}
-	return sanitizer.Sanitize(stdout.String()), nil
+	return sub
 }
 
-// limitWriter caps the bytes written to w. After the cap is reached
-// it pretends to accept the rest so pandoc keeps draining its stdout
-// pipe and exits normally; exceeded is recorded for the caller to
-// surface as ErrOutputTooLarge. Returning a non-nil error here would
-// cause exec's io.Copy to stop and pandoc would block on a full pipe
-// until the context timeout fires.
-type limitWriter struct {
-	w         io.Writer
-	remaining int
-	exceeded  bool
+// Placeholder wraps a LaTeX source fragment in a <div class="latex-pending">
+// the browser-side latex-render.js will swap with pandoc.wasm's HTML output.
+//
+// The source is base64-encoded so arbitrary content (newlines, quotes,
+// braces, raw HTML inside \begin{verbatim}) survives a single DOM
+// attribute round-trip without needing per-character escaping.
+//
+// dataLine is the 1-indexed source line of the fence/document opening;
+// it stamps the placeholder for scroll-sync, and is preserved on the
+// rendered wrapper. Pass an empty string for whole-.tex documents
+// where line-level scroll-sync is deferred to v2.
+func Placeholder(src []byte, dataLine string) string {
+	b64 := base64.StdEncoding.EncodeToString(src)
+	var b strings.Builder
+	b.WriteString(`<div class="latex-pending"`)
+	if dataLine != "" {
+		b.WriteString(` data-line="`)
+		b.WriteString(gohtml.EscapeString(dataLine))
+		b.WriteString(`"`)
+	}
+	b.WriteString(` data-src="`)
+	b.WriteString(b64)
+	b.WriteString(`">Rendering LaTeX…</div>`)
+	return b.String()
 }
 
-func (l *limitWriter) Write(p []byte) (int, error) {
-	if l.remaining <= 0 {
-		l.exceeded = true
-		return len(p), nil
-	}
-	if len(p) > l.remaining {
-		n, err := l.w.Write(p[:l.remaining])
-		l.remaining -= n
-		l.exceeded = true
-		if err != nil {
-			return n, err
-		}
-		return len(p), nil
-	}
-	n, err := l.w.Write(p)
-	l.remaining -= n
-	return n, err
+// HasLatex reports whether body contains any latex-pending placeholder
+// the client-side renderer must process. BuildPage uses this to skip
+// the ~58 MB pandoc.wasm bundle for the math-free common case.
+func HasLatex(body string) bool {
+	return strings.Contains(body, `class="latex-pending"`)
 }

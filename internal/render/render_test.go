@@ -1,8 +1,8 @@
 package render
 
 import (
+	"encoding/base64"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -165,32 +165,31 @@ func TestRenderFencedCode(t *testing.T) {
 	}
 }
 
-func TestRenderFencedLatex_RoutedThroughPandoc(t *testing.T) {
-	if _, err := exec.LookPath("pandoc"); err != nil {
-		t.Skip("pandoc not on PATH; skipping")
-	}
-	src := "Prose.\n\n```latex\n\\section{Hello}\nWith \\emph{emphasis}.\n```\n\nAfter.\n"
+// Fenced ```latex / ```tex / ```pandoc-latex blocks now emit a
+// client-side placeholder; pandoc.wasm in the browser turns it into
+// HTML. The Go side just has to encode the source and stamp data-line.
+
+func TestRenderFencedLatex_EmitsPlaceholder(t *testing.T) {
+	body := "\\section{Hello}\nWith \\emph{emphasis}.\n"
+	src := "Prose.\n\n```latex\n" + body + "```\n\nAfter.\n"
 	out := RenderBytes([]byte(src))
-	if !strings.Contains(out, `class="latex-block"`) {
-		t.Errorf("expected latex-block wrapper, got: %q", out)
+	if !strings.Contains(out, `class="latex-pending"`) {
+		t.Errorf("expected latex-pending placeholder, got: %q", out)
 	}
-	if !strings.Contains(out, `<em>emphasis</em>`) {
-		t.Errorf("expected pandoc-rendered <em> in output, got: %q", out)
+	wantB64 := base64.StdEncoding.EncodeToString([]byte(body))
+	if !strings.Contains(out, `data-src="`+wantB64+`"`) {
+		t.Errorf("expected base64-encoded source in placeholder, got: %q", out)
 	}
-	// The fence must not be rendered as a code block when language is latex.
 	if strings.Contains(out, `class="language-latex"`) {
-		t.Errorf("latex fence was rendered as code block, not pandoc-routed")
+		t.Errorf("latex fence was emitted as a code block, not a placeholder")
 	}
 }
 
-func TestRenderFencedTex_AlsoRouted(t *testing.T) {
-	if _, err := exec.LookPath("pandoc"); err != nil {
-		t.Skip("pandoc not on PATH; skipping")
-	}
+func TestRenderFencedTex_AlsoPlaceholder(t *testing.T) {
 	src := "```tex\n\\textbf{bold}\n```\n"
 	out := RenderBytes([]byte(src))
-	if !strings.Contains(out, `<strong>bold</strong>`) {
-		t.Errorf("expected pandoc-rendered <strong>, got: %q", out)
+	if !strings.Contains(out, `class="latex-pending"`) {
+		t.Errorf("expected latex-pending placeholder for ```tex, got: %q", out)
 	}
 }
 
@@ -205,66 +204,37 @@ func TestRenderFencedNonLatex_StaysAsCodeBlock(t *testing.T) {
 	}
 }
 
-func TestRenderBody_DispatchesTexExtension(t *testing.T) {
-	if _, err := exec.LookPath("pandoc"); err != nil {
-		t.Skip("pandoc not on PATH; skipping")
-	}
+func TestRenderBody_TexExtensionEmitsPlaceholder(t *testing.T) {
 	tmp := t.TempDir()
 	path := tmp + "/sample.tex"
-	if err := os.WriteFile(path, []byte(`\section{From tex}`), 0o600); err != nil {
+	body := []byte(`\section{From tex}`)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	out, err := RenderBody(path)
 	if err != nil {
 		t.Fatalf("RenderBody: %v", err)
 	}
-	if !strings.Contains(out, `From tex`) {
-		t.Errorf("expected pandoc-rendered heading, got: %q", out)
+	if !strings.Contains(out, `class="latex-pending"`) {
+		t.Errorf("expected latex-pending placeholder for .tex file, got: %q", out)
 	}
-	if strings.Contains(out, `<pre>`) {
-		t.Errorf(".tex should not render as preformatted text, got: %q", out)
+	wantB64 := base64.StdEncoding.EncodeToString(body)
+	if !strings.Contains(out, `data-src="`+wantB64+`"`) {
+		t.Errorf("expected base64-encoded .tex source in placeholder, got: %q", out)
 	}
 }
 
 func TestRenderFencedLatex_DataLinePreserved(t *testing.T) {
-	if _, err := exec.LookPath("pandoc"); err != nil {
-		t.Skip("pandoc not on PATH; skipping")
-	}
-	// The fenced block opens on line 3 (1-indexed). data-line must
-	// stamp the latex-block div with that line so scroll-sync still
-	// targets the right paragraph.
+	// Fence opens on line 3 (1-indexed). The placeholder must carry
+	// that data-line so scroll-sync still targets the right paragraph
+	// before the client renders the LaTeX into a .latex-block wrapper.
 	src := "prose\n\n```latex\n\\section{X}\n```\n"
 	out := RenderBytes([]byte(src))
-	if !strings.Contains(out, `class="latex-block"`) {
-		t.Fatalf("expected latex-block wrapper: %q", out)
+	if !strings.Contains(out, `class="latex-pending"`) {
+		t.Fatalf("expected latex-pending placeholder: %q", out)
 	}
 	if !strings.Contains(out, `data-line="3"`) {
-		t.Errorf(`expected data-line="3" on latex-block, got: %q`, out)
-	}
-}
-
-func TestRenderBody_PandocMissingShowsInstallHint(t *testing.T) {
-	tmp := t.TempDir()
-	path := tmp + "/sample.tex"
-	if err := os.WriteFile(path, []byte(`\section{X}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// Stub PATH so pandoc lookup fails: latex.Render returns
-	// ErrPandocNotFound, which latexErrorBody must replace with an
-	// install hint instead of dumping the raw err.Error().
-	origPath := os.Getenv("PATH")
-	t.Setenv("PATH", tmp) // tmp has no pandoc binary
-	defer os.Setenv("PATH", origPath)
-
-	body, err := RenderBody(path)
-	if err == nil {
-		t.Fatalf("expected error when pandoc missing")
-	}
-	if !strings.Contains(body, "apt install pandoc") {
-		t.Errorf("expected install hint in body, got: %q", body)
-	}
-	if strings.Contains(body, "ErrPandocNotFound") {
-		t.Errorf("raw sentinel name leaked into user-facing body: %q", body)
+		t.Errorf(`expected data-line="3" on placeholder, got: %q`, out)
 	}
 }
 
