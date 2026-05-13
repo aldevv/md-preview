@@ -141,10 +141,10 @@ func isLatexLang(language []byte) bool {
 	return false
 }
 
-// emitLatexFence renders the fence body via host pandoc when it's on
-// PATH (~13 ms warm, ~150x faster than the WASM path) and falls back
-// to a latex-pending placeholder for the client-side wasm renderer
-// when pandoc isn't installed.
+// emitLatexFence renders the fence body via host pandoc. On error
+// the user-visible message is dropped into a .latex-error div so the
+// preview surfaces the failure instead of silently dropping the
+// block.
 func (d *dataLineRenderer) emitLatexFence(w util.BufWriter, source []byte, n *ast.FencedCodeBlock) {
 	var body bytes.Buffer
 	for i := 0; i < n.Lines().Len(); i++ {
@@ -160,23 +160,28 @@ func (d *dataLineRenderer) emitLatexFence(w util.BufWriter, source []byte, n *as
 			dataLine = typed
 		}
 	}
-	if latex.PandocAvailable() {
-		rendered, err := latex.Render(context.Background(), body.Bytes(), d.sourceDir)
-		if err == nil {
-			_, _ = w.WriteString(`<div class="latex-block"`)
-			if dataLine != "" {
-				_, _ = w.WriteString(` data-line="`)
-				_, _ = w.WriteString(dataLine)
-				_, _ = w.WriteString(`"`)
-			}
-			_, _ = w.WriteString(`>`)
-			_, _ = w.WriteString(rendered)
-			_, _ = w.WriteString("</div>\n")
-			return
+	rendered, err := latex.Render(context.Background(), body.Bytes(), d.sourceDir)
+	if err != nil {
+		_, _ = w.WriteString(`<div class="latex-error"`)
+		if dataLine != "" {
+			_, _ = w.WriteString(` data-line="`)
+			_, _ = w.WriteString(dataLine)
+			_, _ = w.WriteString(`"`)
 		}
+		_, _ = w.WriteString(`>LaTeX render error: `)
+		_, _ = w.WriteString(gohtml.EscapeString(err.Error()))
+		_, _ = w.WriteString("</div>\n")
+		return
 	}
-	_, _ = w.WriteString(latex.Placeholder(body.Bytes(), dataLine))
-	_ = w.WriteByte('\n')
+	_, _ = w.WriteString(`<div class="latex-block"`)
+	if dataLine != "" {
+		_, _ = w.WriteString(` data-line="`)
+		_, _ = w.WriteString(dataLine)
+		_, _ = w.WriteString(`"`)
+	}
+	_, _ = w.WriteString(`>`)
+	_, _ = w.WriteString(rendered)
+	_, _ = w.WriteString("</div>\n")
 }
 
 func (d *dataLineRenderer) renderCodeBlock(w util.BufWriter, source []byte, n ast.Node, entering bool) (ast.WalkStatus, error) {
@@ -347,25 +352,24 @@ func renderHTML(source []byte, sourceDir string) string {
 // HTML body with data-line="N" attributes (1-indexed) on every block-level
 // open tag whose origin can be traced to a source line.
 //
-// On read error, it returns an HTML <p>Error reading file: ...</p> body and
-// a non-nil error so callers can decide whether to surface the failure.
+// On read error, returns an HTML body and a non-nil error so callers
+// can decide whether to surface the failure. On pandoc-not-found for
+// LaTeX content, returns latex.ErrPandocNotFound so the caller can
+// print a usable install hint and exit non-zero.
 //
-// File extension dispatches the renderer: .tex / .latex emit a single
-// latex-pending placeholder the browser-side renderer converts via
-// pandoc.wasm; everything else uses goldmark.
+// File extension dispatches the renderer: .tex / .latex go through
+// pandoc; everything else uses goldmark.
 func RenderBody(path string) (string, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Sprintf("<p>Error reading file: %s</p>", gohtml.EscapeString(err.Error())), err
 	}
 	if IsLatexPath(path) {
-		if latex.PandocAvailable() {
-			rendered, err := latex.Render(context.Background(), content, filepath.Dir(path))
-			if err == nil {
-				return `<div class="latex-block">` + rendered + `</div>`, nil
-			}
+		rendered, err := latex.Render(context.Background(), content, filepath.Dir(path))
+		if err != nil {
+			return "", err
 		}
-		return latex.Placeholder(content, ""), nil
+		return `<div class="latex-block">` + rendered + `</div>`, nil
 	}
 	sourceDir := filepath.Dir(path)
 	stripped := stripFrontmatter(string(content))

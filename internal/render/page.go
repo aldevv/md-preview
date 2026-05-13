@@ -3,8 +3,6 @@ package render
 import (
 	"fmt"
 	"strings"
-
-	"github.com/aldevv/md-preview/internal/render/latex"
 )
 
 // CSSDark holds the dark theme CSS custom properties.
@@ -247,18 +245,13 @@ ws.onclose = () => {
 };
 `
 
-// BuildPage wraps an HTML body in the preview page template using
-// /_/ as the LaTeX-assets URL prefix (server mode).
+// BuildPage wraps an HTML body in the preview page template.
+//
+// theme selects the color palette: "dark" (default) or "light".
+// wsPort > 0 embeds the WebSocket scroll/reload client.
+// extraCSS is appended after the default CSS so it wins via cascade.
+// colemak swaps the in-page nav keys from j/k/l to n/e/i.
 func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool) string {
-	return BuildPageWithAssets(body, theme, wsPort, extraCSS, colemak, "/_/")
-}
-
-// BuildPageWithAssets is BuildPage with a caller-provided URL prefix
-// for the LaTeX bundle (pandoc.wasm.gz, pandoc.js, etc). Use "/_/"
-// for HTTP-served previews; for static file:// previews pass an
-// absolute file:// URL pointing at the sibling-assets dir from
-// latex.WriteSiblingAssets.
-func BuildPageWithAssets(body, theme string, wsPort int, extraCSS string, colemak bool, assetsPrefix string) string {
 	cssVars := CSSDark
 	hljsThemeCSS := hljsThemeDarkCSS
 	if theme == "light" {
@@ -272,26 +265,11 @@ func BuildPageWithAssets(body, theme string, wsPort int, extraCSS string, colema
 	}
 
 	// Skip the ~645 KiB KaTeX bundle when the body has no math markers.
-	// The vast majority of markdown previews are math-free and shouldn't
-	// pay that cost. mdpRenderMath() is still defined unconditionally
-	// (it no-ops when renderMathInElement is undefined).
 	katexCSSOut, katexJSOut, katexAutoRenderJSOut := "", "", ""
 	if hasMath(body) {
 		katexCSSOut = katexCSS
 		katexJSOut = katexScript
 		katexAutoRenderJSOut = katexAutoRenderScript
-	}
-
-	// Bundle pandoc.wasm + glue scripts only when the rendered body
-	// has at least one latex-pending placeholder. pandoc.wasm is
-	// ~58 MB raw / ~15 MB gzipped; pulling it in for every preview
-	// would inflate first-paint time for the math-free common case.
-	// The CSS is appended unconditionally — a few hundred bytes — so
-	// .latex-block / .latex-error / .latex-pending styles are
-	// available even if the user toggles content via WS reload.
-	latexScripts := ""
-	if latex.HasLatex(body) {
-		latexScripts = fmt.Sprintf(latexScriptTags, assetsPrefix, assetsPrefix)
 	}
 
 	return fmt.Sprintf(`<!DOCTYPE html>
@@ -334,23 +312,14 @@ mdpRenderMath();
 %s
 %s
 </script>
-%s
 </body>
-</html>`, hljsThemeCSS, cssVars, CSSCommon, latexCSS, katexCSSOut, extraCSS, body, hljsScript, katexJSOut, katexAutoRenderJSOut, vimKeys(colemak), wsScript, latexScripts)
+</html>`, hljsThemeCSS, cssVars, CSSCommon, latexCSS, katexCSSOut, extraCSS, body, hljsScript, katexJSOut, katexAutoRenderJSOut, vimKeys(colemak), wsScript)
 }
 
-// latexCSS styles the three states the placeholder cycles through:
-// pending (server emitted, WASM hasn't rendered yet), block (success),
-// error (pandoc-wasm threw). Bundled unconditionally since it's tiny.
+// latexCSS styles the two states emitted by emitLatexFence: rendered
+// .latex-block and error .latex-error. Bundled unconditionally since
+// it's a few hundred bytes.
 const latexCSS = `
-.markdown-body .latex-pending {
-  color: var(--color-text-secondary);
-  font-style: italic;
-  padding: 1em;
-  border: 1px dashed var(--color-border);
-  border-radius: 6px;
-  margin-bottom: 1em;
-}
 .markdown-body .latex-block { margin-bottom: 1em; }
 .markdown-body .latex-error {
   color: var(--color-alert-caution);
@@ -365,32 +334,14 @@ const latexCSS = `
 }
 `
 
-// %s twice: gets the assets URL prefix. purify.min.js must load
-// synchronously (no defer) so window.DOMPurify is set before the
-// module's top-level await fires.
-const latexScriptTags = `<script src="%spurify.min.js"></script>
-<script type="module" src="%slatex-render.js"></script>
-`
-
 // hasMath checks whether the rendered body has any math markers worth
-// loading KaTeX for. Detection is cheap (substring scan) and only needs
-// to be correct enough to skip the bundle when truly math-free; a false
-// positive just pays the bundle cost we'd already accept by default.
-//
-// Single-dollar delimiters are intentionally NOT detected: KaTeX
-// auto-render isn't configured for them (prose like `Costs $5 and $10`
-// produced too many false positives), so a body whose only math marker
-// is a bare `$` won't render either way.
-//
-// A latex-pending placeholder triggers the bundle too: pandoc.wasm's
-// --mathjax output stamps the same \(...\) / \[...\] markers KaTeX's
-// auto-render scans for, and latex-render.js re-runs mdpRenderMath()
-// over the swapped-in HTML.
+// loading KaTeX for. Single-dollar delimiters are intentionally NOT
+// detected: KaTeX auto-render isn't configured for them (prose like
+// `Costs $5 and $10` produced too many false positives).
 func hasMath(body string) bool {
 	for _, marker := range []string{
 		`\(`, `\[`, `$$`,
 		`class="math inline"`, `class="math display"`,
-		`class="latex-pending"`,
 	} {
 		if strings.Contains(body, marker) {
 			return true

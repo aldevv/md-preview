@@ -85,11 +85,17 @@ Enable Colemak with `colemak = true` in the [config](#config).
 
 ### LaTeX
 
-mdp renders `.tex` / `.latex` files and ` ```latex ` fenced blocks inside markdown. The Pandoc 3.9 wasm32-wasi build is bundled into the binary; the browser runs it via `@bjorn3/browser_wasi_shim`, no external `pandoc` install required. Output is DOMPurify-sanitized before injection.
+mdp renders `.tex` / `.latex` files and ` ```latex ` fenced blocks inside markdown by shelling out to `pandoc`. Install:
 
-Because the browser needs to load the WASM bundle, LaTeX previews always run through the auto-reload HTTP server — `mdp foo.tex` is equivalent to `mdp watch foo.tex` and stays running until Ctrl-C. Static-mode (`-p` print path) is not available for LaTeX content; use `mdp watch` instead.
+```sh
+apt install pandoc   # Debian/Ubuntu
+brew install pandoc  # macOS
+pacman -S pandoc     # Arch
+```
 
-Coverage matches Pandoc: sectioning, lists, refs, tables, common math, citations. TikZ/PGFPlots are dropped (no real TeX engine), `\input{}` across multiple files isn't resolved (the WASM filesystem is in-memory), and editor scroll-sync inside `.tex` previews is deferred. See [`docs/latex.md`](docs/latex.md) for the full design.
+`mdp foo.tex` without pandoc prints the install hint and exits non-zero. Math-free `.md` files have no pandoc dependency.
+
+Coverage matches Pandoc: sectioning, lists, refs, tables, common math, citations. TikZ/PGFPlots are dropped (no real TeX engine), `\input{}` is sandboxed-blocked, and editor scroll-sync inside `.tex` content is block-level only. See [`docs/latex.md`](docs/latex.md) for the full design.
 
 ### Notes
 
@@ -138,26 +144,10 @@ The skill loads its mdp-driving reference from the binary itself via `mdp skill 
 Issues and PRs welcome at [github.com/aldevv/md-preview/issues](https://github.com/aldevv/md-preview/issues).
 
 ```sh
-make test         # go test ./...
-make build        # produces ./mdp
-make install      # go install ./cmd/mdp
-make pandoc-wasm  # refresh the embedded pandoc.wasm.gz (when bumping PANDOC_WASM_VERSION)
-make test-e2e     # browser end-to-end suite (needs Chromium, see below)
+make test     # go test ./...
+make build    # produces ./mdp
+make install  # go install ./cmd/mdp
 ```
-
-The repo ships `internal/render/latex/wasm/pandoc.wasm.gz` (16 MB, gzipped from upstream's 58 MB) so that `go install github.com/aldevv/md-preview/cmd/mdp@latest` builds cleanly without a separate fetch step. Browsers decode the gzip transparently during `WebAssembly.instantiateStreaming` via the `Content-Encoding: gzip` header mdp sends on the `/_/pandoc.wasm` route, so there's no runtime decompression cost. To upgrade it, bump `PANDOC_WASM_VERSION` in the Makefile, run `make pandoc-wasm`, then commit the new `pandoc.wasm.gz` + `pandoc.wasm.sha256` together.
-
-### Browser e2e tests
-
-`internal/server/latex_e2e_test.go` (build tag `e2e`) drives a headless Chromium via [playwright-go](https://github.com/playwright-community/playwright-go) against the production handler and asserts that pandoc.wasm initializes, `latex-render.js` swaps `.latex-pending` placeholders, KaTeX picks up math markers, and math-free markdown does NOT pull in the WASM bundle. Run them with `make test-e2e` after a one-time setup:
-
-```sh
-go install github.com/playwright-community/playwright-go/cmd/playwright@latest
-playwright install --with-deps chromium
-make test-e2e
-```
-
-The default `go test ./...` skips these (no `-tags=e2e`), so CI and local hacking stay hermetic. Run them before bumping `PANDOC_WASM_VERSION` or touching anything under `internal/render/latex/wasm/`.
 
 ## License
 

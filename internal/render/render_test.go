@@ -1,7 +1,7 @@
 package render
 
 import (
-	"encoding/base64"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -168,18 +168,17 @@ func TestRenderFencedCode(t *testing.T) {
 }
 
 // hideFromPath empties PATH for the duration of the test so the
-// pandoc lookup miss and the WASM-placeholder fallback engages.
-// Resets latex.pandocBin via package-internal hook to bypass the
-// sync.Once cache.
+// pandoc lookup miss path engages (emits a .latex-error div in
+// fences, or returns ErrPandocNotFound from RenderBody).
 func hideFromPath(t *testing.T) {
 	t.Helper()
 	t.Setenv("PATH", "/nonexistent")
 	latex.ResetPandocProbe()
 }
 
-func TestRenderFencedLatex_PandocPath(t *testing.T) {
+func TestRenderFencedLatex_PandocRenders(t *testing.T) {
 	if !latex.PandocAvailable() {
-		t.Skip("pandoc not on PATH; covered by the fallback test")
+		t.Skip("pandoc not on PATH")
 	}
 	src := "Prose.\n\n```latex\n\\textbf{bold}\n```\n"
 	out := RenderBytes([]byte(src))
@@ -191,29 +190,15 @@ func TestRenderFencedLatex_PandocPath(t *testing.T) {
 	}
 }
 
-func TestRenderFencedLatex_WasmFallback(t *testing.T) {
+func TestRenderFencedLatex_PandocMissingShowsError(t *testing.T) {
 	hideFromPath(t)
-	body := "\\section{Hello}\nWith \\emph{emphasis}.\n"
-	src := "Prose.\n\n```latex\n" + body + "```\n\nAfter.\n"
+	src := "Prose.\n\n```latex\n\\section{X}\n```\n"
 	out := RenderBytes([]byte(src))
-	if !strings.Contains(out, `class="latex-pending"`) {
-		t.Errorf("expected latex-pending placeholder, got: %q", out)
+	if !strings.Contains(out, `class="latex-error"`) {
+		t.Errorf("expected .latex-error in fence output, got: %q", out)
 	}
-	wantB64 := base64.StdEncoding.EncodeToString([]byte(body))
-	if !strings.Contains(out, `data-src="`+wantB64+`"`) {
-		t.Errorf("expected base64-encoded source in placeholder, got: %q", out)
-	}
-	if strings.Contains(out, `class="language-latex"`) {
-		t.Errorf("latex fence emitted as code block, not a placeholder")
-	}
-}
-
-func TestRenderFencedTex_WasmFallback(t *testing.T) {
-	hideFromPath(t)
-	src := "```tex\n\\textbf{bold}\n```\n"
-	out := RenderBytes([]byte(src))
-	if !strings.Contains(out, `class="latex-pending"`) {
-		t.Errorf("expected latex-pending placeholder for ```tex, got: %q", out)
+	if !strings.Contains(out, "pandoc not found") {
+		t.Errorf("expected install hint in error message, got: %q", out)
 	}
 }
 
@@ -228,36 +213,33 @@ func TestRenderFencedNonLatex_StaysAsCodeBlock(t *testing.T) {
 	}
 }
 
-func TestRenderBody_TexExtensionWasmFallback(t *testing.T) {
+func TestRenderBody_TexExtensionRequiresPandoc(t *testing.T) {
 	hideFromPath(t)
 	tmp := t.TempDir()
 	path := tmp + "/sample.tex"
-	body := []byte(`\section{From tex}`)
-	if err := os.WriteFile(path, body, 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`\section{X}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	out, err := RenderBody(path)
-	if err != nil {
-		t.Fatalf("RenderBody: %v", err)
+	_, err := RenderBody(path)
+	if err == nil {
+		t.Fatalf("expected error for .tex without pandoc, got nil")
 	}
-	if !strings.Contains(out, `class="latex-pending"`) {
-		t.Errorf("expected latex-pending placeholder for .tex file, got: %q", out)
-	}
-	wantB64 := base64.StdEncoding.EncodeToString(body)
-	if !strings.Contains(out, `data-src="`+wantB64+`"`) {
-		t.Errorf("expected base64-encoded .tex source in placeholder, got: %q", out)
+	if !errors.Is(err, latex.ErrPandocNotFound) {
+		t.Errorf("err = %v, want ErrPandocNotFound", err)
 	}
 }
 
 func TestRenderFencedLatex_DataLinePreserved(t *testing.T) {
-	hideFromPath(t)
+	if !latex.PandocAvailable() {
+		t.Skip("pandoc not on PATH")
+	}
 	src := "prose\n\n```latex\n\\section{X}\n```\n"
 	out := RenderBytes([]byte(src))
-	if !strings.Contains(out, `class="latex-pending"`) {
-		t.Fatalf("expected latex-pending placeholder: %q", out)
+	if !strings.Contains(out, `class="latex-block"`) {
+		t.Fatalf("expected latex-block wrapper: %q", out)
 	}
 	if !strings.Contains(out, `data-line="3"`) {
-		t.Errorf(`expected data-line="3" on placeholder, got: %q`, out)
+		t.Errorf(`expected data-line="3" on latex-block, got: %q`, out)
 	}
 }
 
