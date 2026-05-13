@@ -1,0 +1,126 @@
+name: pandoc-bump
+
+# Daily: check jgm/pandoc for a newer release than what's pinned in
+# internal/render/pandoc/fetch.go. If newer, download the linux-amd64
+# tarball, validate the binary runs and lists input formats, then push
+# the bumped Version constant and regenerated supported_formats.txt
+# directly to main. Skips silently on any validation failure so a
+# broken upstream release doesn't land here.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Resolve latest pandoc tag
+        id: latest
+        run: |
+          set -euo pipefail
+          tag=$(curl -fsSL https://api.github.com/repos/jgm/pandoc/releases/latest | jq -r '.tag_name')
+          if [ -z "$tag" ] || [ "$tag" = "null" ]; then
+            echo "::warning::could not resolve latest pandoc release; skipping"
+            exit 0
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Read pinned version
+        id: pinned
+        run: |
+          v=$(grep -oE 'const Version = "[^"]+"' internal/render/pandoc/fetch.go | sed -E 's/.*"([^"]+)"/\1/')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Skip when already current
+        if: steps.latest.outputs.version == steps.pinned.outputs.version
+        run: echo "pandoc already pinned to ${{ steps.pinned.outputs.version }}; nothing to do"
+
+      - name: Download + validate new pandoc
+        id: validate
+        if: steps.latest.outputs.version != steps.pinned.outputs.version
+        run: |
+          set -euo pipefail
+          v=${{ steps.latest.outputs.version }}
+          url="https://github.com/jgm/pandoc/releases/download/${v}/pandoc-${v}-linux-amd64.tar.gz"
+          work=$(mktemp -d)
+          cd "$work"
+
+          if ! curl -fsSL -o pandoc.tar.gz "$url"; then
+            echo "::warning::download failed for $url; treating as corrupt release"
+            exit 0
+          fi
+          if ! tar -xzf pandoc.tar.gz 2>/dev/null; then
+            echo "::warning::tarball failed to extract; treating as corrupt release"
+            exit 0
+          fi
+          bin="pandoc-${v}/bin/pandoc"
+          if [ ! -x "$bin" ]; then
+            echo "::warning::extracted binary missing or not executable"
+            exit 0
+          fi
+          if ! "./$bin" --version >/dev/null 2>&1; then
+            echo "::warning::binary didn't run; refusing to bump"
+            exit 0
+          fi
+          formats=$("./$bin" --list-input-formats 2>/dev/null || true)
+          if [ -z "$formats" ]; then
+            echo "::warning::--list-input-formats returned empty; refusing to bump"
+            exit 0
+          fi
+          # Sanity check: every format we currently rely on should still
+          # be supported. If pandoc drops `latex` we want to know before
+          # bumping, not after users hit broken renders.
+          for required in latex rst org html docx odt epub; do
+            if ! echo "$formats" | grep -qx "$required"; then
+              echo "::warning::pandoc $v dropped required format '$required'; refusing to bump"
+              exit 0
+            fi
+          done
+
+          # Stage the new artifacts where the apply step can read them.
+          mkdir -p "$GITHUB_WORKSPACE/.pandoc-bump"
+          echo "$formats" > "$GITHUB_WORKSPACE/.pandoc-bump/supported_formats.txt"
+          # Also stage the binary so the test step can use it without
+          # apt-installing the (older) Ubuntu pandoc.
+          cp "$bin" "$GITHUB_WORKSPACE/.pandoc-bump/pandoc"
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      - name: Apply bump and verify
+        if: steps.validate.outputs.ok == 'true'
+        run: |
+          set -euo pipefail
+          v=${{ steps.latest.outputs.version }}
+          sed -i -E "s/const Version = \"[^\"]+\"/const Version = \"$v\"/" internal/render/pandoc/fetch.go
+          cp .pandoc-bump/supported_formats.txt internal/render/pandoc/supported_formats.txt
+
+          # Use the freshly-validated pandoc for the test run so the
+          # format-coverage tests actually exercise the new release.
+          export PATH="$GITHUB_WORKSPACE/.pandoc-bump:$PATH"
+          go build ./...
+          go test ./...
+
+      - name: Push to main
+        if: steps.validate.outputs.ok == 'true'
+        run: |
+          set -euo pipefail
+          v=${{ steps.latest.outputs.version }}
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add internal/render/pandoc/fetch.go internal/render/pandoc/supported_formats.txt
+          if git diff --cached --quiet; then
+            echo "no changes to commit"
+            exit 0
+          fi
+          git commit -m "pandoc: bump pinned version to $v"
+          git push origin HEAD:main

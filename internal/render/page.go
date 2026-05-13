@@ -5,127 +5,6 @@ import (
 	"strings"
 )
 
-// CSSDark holds the dark theme CSS custom properties.
-const CSSDark = `
-:root {
-  --color-bg-primary: #0d1117;
-  --color-text-primary: #c9d1d9;
-  --color-text-secondary: #8b949e;
-  --color-border: #30363d;
-  --color-bg-code: #161b22;
-  --color-link: #58a6ff;
-  --color-heading-border: #21262d;
-  --color-alert-note: #1f6feb;
-  --color-alert-tip: #238636;
-  --color-alert-important: #8957e5;
-  --color-alert-warning: #d29922;
-  --color-alert-caution: #da3633;
-}
-`
-
-// CSSLight holds the light theme CSS custom properties.
-const CSSLight = `
-:root {
-  --color-bg-primary: #ffffff;
-  --color-text-primary: #24292e;
-  --color-text-secondary: #586069;
-  --color-border: #e1e4e8;
-  --color-bg-code: #f6f8fa;
-  --color-link: #0366d6;
-  --color-heading-border: #eaecef;
-  --color-alert-note: #0969da;
-  --color-alert-tip: #1a7f37;
-  --color-alert-important: #8250df;
-  --color-alert-warning: #9a6700;
-  --color-alert-caution: #cf222e;
-}
-`
-
-// CSSCommon holds the shared markdown body styling.
-const CSSCommon = `
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body {
-  background: var(--color-bg-primary);
-  color: var(--color-text-primary);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-  font-size: 18px;
-  line-height: 1.6;
-  padding: 32px;
-  max-width: 900px;
-  margin: 0 auto;
-}
-.markdown-body h1 { font-size: 2.25em; border-bottom: 1px solid var(--color-heading-border); padding-bottom: 0.3em; margin-bottom: 1em; margin-top: 1.5em; }
-.markdown-body h2 { font-size: 1.75em; border-bottom: 1px solid var(--color-heading-border); padding-bottom: 0.3em; margin-bottom: 1em; margin-top: 1.5em; }
-.markdown-body h3 { font-size: 1.5em; margin-bottom: 0.75em; margin-top: 1.5em; }
-.markdown-body h4 { font-size: 1.25em; margin-bottom: 0.75em; margin-top: 1.5em; }
-.markdown-body h5 { font-size: 1em; margin-bottom: 0.75em; margin-top: 1.5em; }
-.markdown-body h6 { font-size: 0.875em; color: var(--color-text-secondary); margin-bottom: 0.75em; margin-top: 1.5em; }
-.markdown-body p { margin-bottom: 1em; }
-.markdown-body a { color: var(--color-link); text-decoration: none; }
-.markdown-body a:hover { text-decoration: underline; }
-.markdown-body code {
-  background: var(--color-bg-code);
-  border-radius: 4px;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-  font-size: 85%;
-  padding: 0.2em 0.4em;
-}
-.markdown-body pre {
-  background: var(--color-bg-code);
-  border-radius: 6px;
-  overflow: auto;
-  padding: 16px;
-  margin-bottom: 1em;
-}
-.markdown-body pre code {
-  background: none;
-  padding: 0;
-  font-size: 100%;
-  white-space: pre;
-}
-.markdown-body blockquote {
-  border-left: 4px solid var(--color-border);
-  color: var(--color-text-secondary);
-  padding: 0 1em;
-  margin-bottom: 1em;
-}
-.markdown-body ul, .markdown-body ol { padding-left: 2em; margin-bottom: 1em; }
-.markdown-body li { margin-bottom: 0.25em; }
-.markdown-body table { border-collapse: collapse; width: 100%; margin-bottom: 1em; }
-.markdown-body th, .markdown-body td {
-  border: 1px solid var(--color-border);
-  padding: 6px 13px;
-  text-align: left;
-}
-.markdown-body th { background: var(--color-bg-code); font-weight: 600; }
-.markdown-body tr:nth-child(even) { background: var(--color-bg-code); }
-.markdown-body hr { border: none; border-top: 1px solid var(--color-border); margin: 1.5em 0; }
-.markdown-body img { max-width: 100%; }
-.markdown-body .markdown-alert {
-  border-left: 4px solid;
-  padding: 8px 16px;
-  margin-bottom: 1em;
-}
-.markdown-body .markdown-alert > p { margin-bottom: 0.5em; }
-.markdown-body .markdown-alert > p:last-child { margin-bottom: 0; }
-.markdown-body .markdown-alert-title {
-  font-weight: 600;
-  text-transform: uppercase;
-  font-size: 0.85em;
-  letter-spacing: 0.05em;
-}
-.markdown-body .markdown-alert-note { border-color: var(--color-alert-note); }
-.markdown-body .markdown-alert-note .markdown-alert-title { color: var(--color-alert-note); }
-.markdown-body .markdown-alert-tip { border-color: var(--color-alert-tip); }
-.markdown-body .markdown-alert-tip .markdown-alert-title { color: var(--color-alert-tip); }
-.markdown-body .markdown-alert-important { border-color: var(--color-alert-important); }
-.markdown-body .markdown-alert-important .markdown-alert-title { color: var(--color-alert-important); }
-.markdown-body .markdown-alert-warning { border-color: var(--color-alert-warning); }
-.markdown-body .markdown-alert-warning .markdown-alert-title { color: var(--color-alert-warning); }
-.markdown-body .markdown-alert-caution { border-color: var(--color-alert-caution); }
-.markdown-body .markdown-alert-caution .markdown-alert-title { color: var(--color-alert-caution); }
-`
-
 // highlight.js theme CSS and the highlight.js bundle itself live in
 // assets.go (embedded via go:embed) and are inlined by BuildPage below.
 
@@ -271,6 +150,12 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool) st
 		katexJSOut = katexScript
 		katexAutoRenderJSOut = katexAutoRenderScript
 	}
+	// Skip the ~3.3 MiB mermaid bundle when no mermaid fence is present.
+	mermaidJSOut, mermaidInit := "", ""
+	if hasMermaid(body) {
+		mermaidJSOut = mermaidScript
+		mermaidInit = `mermaid.initialize({startOnLoad:true,theme:'` + mermaidTheme(theme) + `'});`
+	}
 
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html>
@@ -311,28 +196,28 @@ window.mdpRenderMath = mdpRenderMath;
 mdpRenderMath();
 %s
 %s
+%s
+%s
 </script>
 </body>
-</html>`, hljsThemeCSS, cssVars, CSSCommon, latexCSS, katexCSSOut, extraCSS, body, hljsScript, katexJSOut, katexAutoRenderJSOut, vimKeys(colemak), wsScript)
+</html>`, hljsThemeCSS, cssVars, CSSCommon, pandocCSS, katexCSSOut, extraCSS, body, hljsScript, katexJSOut, katexAutoRenderJSOut, mermaidJSOut, mermaidInit, vimKeys(colemak), wsScript)
 }
 
-// latexCSS styles the two states emitted by emitLatexFence: rendered
-// .latex-block and error .latex-error. Bundled unconditionally since
-// it's a few hundred bytes.
-const latexCSS = `
-.markdown-body .latex-block { margin-bottom: 1em; }
-.markdown-body .latex-error {
-  color: var(--color-alert-caution);
-  background: var(--color-bg-code);
-  padding: 8px 12px;
-  border-left: 4px solid var(--color-alert-caution);
-  border-radius: 4px;
-  font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 90%;
-  margin-bottom: 1em;
-  white-space: pre-wrap;
+// hasMermaid reports whether the rendered body contains a mermaid
+// fence (emitMermaidFence stamps class="mermaid"). Used by BuildPage
+// to skip the ~3.3 MiB mermaid bundle for pages with no diagrams.
+func hasMermaid(body string) bool {
+	return strings.Contains(body, `class="mermaid"`)
 }
-`
+
+// mermaidTheme maps mdp's theme name to a mermaid built-in theme so
+// rendered diagrams visually match the surrounding page chrome.
+func mermaidTheme(theme string) string {
+	if theme == "light" {
+		return "default"
+	}
+	return "dark"
+}
 
 // hasMath checks whether the rendered body has any math markers worth
 // loading KaTeX for. Single-dollar delimiters are intentionally NOT

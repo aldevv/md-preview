@@ -1,0 +1,15 @@
+:root {
+  --color-bg-primary: #ffffff;
+  --color-text-primary: #24292e;
+  --color-text-secondary: #586069;
+  --color-border: #e1e4e8;
+  --color-bg-code: #f6f8fa;
+  --color-bg-inline-code: rgba(208,215,222,0.32);
+  --color-link: #0366d6;
+  --color-heading-border: #eaecef;
+  --color-alert-note: #0969da;
+  --color-alert-tip: #1a7f37;
+  --color-alert-important: #8250df;
+  --color-alert-warning: #9a6700;
+  --color-alert-caution: #cf222e;
+}

@@ -1,0 +1,12 @@
+.markdown-body .pandoc-block { margin-bottom: 1em; }
+.markdown-body .pandoc-error {
+  color: var(--color-alert-caution);
+  background: var(--color-bg-code);
+  padding: 8px 12px;
+  border-left: 4px solid var(--color-alert-caution);
+  border-radius: 4px;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 90%;
+  margin-bottom: 1em;
+  white-space: pre-wrap;
+}

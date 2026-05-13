@@ -24,7 +24,7 @@ import (
 	"github.com/aldevv/md-preview/internal/config"
 	"github.com/aldevv/md-preview/internal/nativewin"
 	"github.com/aldevv/md-preview/internal/render"
-	"github.com/aldevv/md-preview/internal/render/latex"
+	"github.com/aldevv/md-preview/internal/render/pandoc"
 	"github.com/aldevv/md-preview/internal/server"
 )
 
@@ -259,8 +259,8 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 		theme = "dark"
 	}
 
-	if render.IsLatexPath(src) {
-		if _, err := latex.EnsurePandoc(context.Background(), stderr); err != nil {
+	if format := pandoc.InputFormat(src); format != "" {
+		if _, err := pandoc.Ensure(context.Background(), format, stderr); err != nil {
 			fmt.Fprintf(stderr, "mdp: %v\n", err)
 			return 1
 		}
@@ -441,8 +441,8 @@ func runWatchSubcommand(args []string, stdout, stderr io.Writer, env Environment
 		theme = "dark"
 	}
 
-	if render.IsLatexPath(src) {
-		if _, err := latex.EnsurePandoc(context.Background(), stderr); err != nil {
+	if format := pandoc.InputFormat(src); format != "" {
+		if _, err := pandoc.Ensure(context.Background(), format, stderr); err != nil {
 			fmt.Fprintf(stderr, "mdp: %v\n", err)
 			return 1
 		}
@@ -558,8 +558,8 @@ func runServe(args []string, stderr io.Writer) int {
 	if v := os.Getenv("MDP_COLEMAK"); v == "1" || v == "true" {
 		colemak = true
 	}
-	if render.IsLatexPath(args[0]) {
-		if _, err := latex.EnsurePandoc(context.Background(), stderr); err != nil {
+	if format := pandoc.InputFormat(args[0]); format != "" {
+		if _, err := pandoc.Ensure(context.Background(), format, stderr); err != nil {
 			fmt.Fprintf(stderr, "mdp serve: %v\n", err)
 			return 1
 		}

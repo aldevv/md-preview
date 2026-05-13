@@ -1,0 +1,7 @@
+Format,Kind,Notes
+docx,binary,Office Open XML
+odt,binary,OpenDocument Text
+epub,binary,EPUB e-book
+fb2,text,FictionBook XML
+pptx,binary,PowerPoint
+xlsx,binary,Spreadsheet

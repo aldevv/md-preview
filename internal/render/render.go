@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/aldevv/md-preview/internal/render/latex"
+	"github.com/aldevv/md-preview/internal/render/pandoc"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
@@ -36,7 +36,7 @@ var dataLineAttr = []byte("data-line")
 // cloned README drive-by access to the local browser session.
 func newMarkdown(sourceDir string) goldmark.Markdown {
 	return goldmark.New(
-		goldmark.WithExtensions(extension.GFM, Alerts),
+		goldmark.WithExtensions(extension.GFM, Alerts, Math),
 		goldmark.WithParserOptions(
 			parser.WithBlockParsers(
 				util.Prioritized(&lineRecorder{inner: parser.NewThematicBreakParser()}, 100),
@@ -55,9 +55,9 @@ func newMarkdown(sourceDir string) goldmark.Markdown {
 type dataLineRenderer struct {
 	html.Config
 	// sourceDir is the directory of the source markdown file; passed to
-	// latex.Render so \input{} in fenced LaTeX resolves relative to the
-	// document, not to mdp's CWD. Empty for tests / RenderBytes callers
-	// that don't have a file backing them.
+	// pandoc.Render so \input{} in fenced LaTeX resolves relative to
+	// the document, not to mdp's CWD. Empty for tests / RenderBytes
+	// callers that don't have a file backing them.
 	sourceDir string
 }
 
@@ -99,13 +99,19 @@ func (d *dataLineRenderer) writeLines(w util.BufWriter, source []byte, n ast.Nod
 
 func (d *dataLineRenderer) renderFencedCodeBlock(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	n := node.(*ast.FencedCodeBlock)
-	if isLatexLang(n.Language(source)) {
+	if format := pandocFenceFormat(n.Language(source)); format != "" {
 		// Both entering and !entering pass through here; emit the full
 		// <div>...</div> on entering and a no-op on closing. Children of
 		// a FencedCodeBlock are body lines (no separate AST nodes), so
 		// no walk-status special-casing is needed.
 		if entering {
-			d.emitLatexFence(w, source, n)
+			d.emitPandocFence(w, source, n, format)
+		}
+		return ast.WalkContinue, nil
+	}
+	if isMermaidLang(n.Language(source)) {
+		if entering {
+			d.emitMermaidFence(w, source, n)
 		}
 		return ast.WalkContinue, nil
 	}
@@ -127,25 +133,55 @@ func (d *dataLineRenderer) renderFencedCodeBlock(w util.BufWriter, source []byte
 	return ast.WalkContinue, nil
 }
 
-// isLatexLang reports whether the fence info string requests LaTeX
-// rendering. Accepts "latex", "tex", and "pandoc-latex" (case
-// insensitive).
-func isLatexLang(language []byte) bool {
+// isMermaidLang reports whether the fence info string requests
+// client-side mermaid rendering. Case-insensitive match on "mermaid".
+func isMermaidLang(language []byte) bool {
 	if language == nil {
 		return false
 	}
-	switch strings.ToLower(string(language)) {
-	case "latex", "tex", "pandoc-latex":
-		return true
-	}
-	return false
+	return strings.EqualFold(string(language), "mermaid")
 }
 
-// emitLatexFence renders the fence body via host pandoc. On error
-// the user-visible message is dropped into a .latex-error div so the
-// preview surfaces the failure instead of silently dropping the
-// block.
-func (d *dataLineRenderer) emitLatexFence(w util.BufWriter, source []byte, n *ast.FencedCodeBlock) {
+// emitMermaidFence emits a `<pre class="mermaid" data-line=...>`
+// wrapping the raw fence body. mermaid.js (loaded conditionally by
+// the page template when this class is present) auto-runs on page
+// load and replaces each block with an inline SVG diagram.
+func (d *dataLineRenderer) emitMermaidFence(w util.BufWriter, source []byte, n *ast.FencedCodeBlock) {
+	_, _ = w.WriteString(`<pre class="mermaid"`)
+	writeDataLineAttr(w, n)
+	_, _ = w.WriteString(`>`)
+	for i := 0; i < n.Lines().Len(); i++ {
+		line := n.Lines().At(i)
+		_, _ = w.WriteString(gohtml.EscapeString(string(line.Value(source))))
+	}
+	_, _ = w.WriteString("</pre>\n")
+}
+
+// pandocFenceFormat maps a fenced-code info string to the pandoc
+// --from name it should be rendered with, or "" if the fence is
+// just regular code (passes through to the normal highlighter).
+// Recognized: latex/tex/pandoc-latex (→ latex), typst (→ typst).
+// Other formats with viable embedded-fence semantics can be added
+// here; not every pandoc input format makes sense embedded in
+// markdown.
+func pandocFenceFormat(language []byte) string {
+	if language == nil {
+		return ""
+	}
+	switch strings.ToLower(string(language)) {
+	case "latex", "tex", "pandoc-latex":
+		return "latex"
+	case "typst", "typ":
+		return "typst"
+	}
+	return ""
+}
+
+// emitPandocFence renders the fence body via host pandoc using the
+// given --from format. On error the user-visible message is dropped
+// into a .pandoc-error div so the preview surfaces the failure
+// instead of silently dropping the block.
+func (d *dataLineRenderer) emitPandocFence(w util.BufWriter, source []byte, n *ast.FencedCodeBlock, format string) {
 	var body bytes.Buffer
 	for i := 0; i < n.Lines().Len(); i++ {
 		line := n.Lines().At(i)
@@ -160,20 +196,22 @@ func (d *dataLineRenderer) emitLatexFence(w util.BufWriter, source []byte, n *as
 			dataLine = typed
 		}
 	}
-	rendered, err := latex.Render(context.Background(), body.Bytes(), d.sourceDir)
+	rendered, err := pandoc.Render(context.Background(), body.Bytes(), d.sourceDir, format)
 	if err != nil {
-		_, _ = w.WriteString(`<div class="latex-error"`)
+		_, _ = w.WriteString(`<div class="pandoc-error"`)
 		if dataLine != "" {
 			_, _ = w.WriteString(` data-line="`)
 			_, _ = w.WriteString(dataLine)
 			_, _ = w.WriteString(`"`)
 		}
-		_, _ = w.WriteString(`>LaTeX render error: `)
+		_, _ = w.WriteString(`>`)
+		_, _ = w.WriteString(format)
+		_, _ = w.WriteString(` render error: `)
 		_, _ = w.WriteString(gohtml.EscapeString(err.Error()))
 		_, _ = w.WriteString("</div>\n")
 		return
 	}
-	_, _ = w.WriteString(`<div class="latex-block"`)
+	_, _ = w.WriteString(`<div class="pandoc-block"`)
 	if dataLine != "" {
 		_, _ = w.WriteString(` data-line="`)
 		_, _ = w.WriteString(dataLine)
@@ -348,43 +386,33 @@ func renderHTML(source []byte, sourceDir string) string {
 	return buf.String()
 }
 
-// RenderBody reads filepath, strips YAML frontmatter, and renders it to an
-// HTML body with data-line="N" attributes (1-indexed) on every block-level
-// open tag whose origin can be traced to a source line.
+// RenderBody reads filepath, strips YAML frontmatter, and renders it
+// to an HTML body with data-line="N" attributes (1-indexed) on every
+// block-level open tag whose origin can be traced to a source line.
 //
 // On read error, returns an HTML body and a non-nil error so callers
 // can decide whether to surface the failure. On pandoc-not-found for
-// LaTeX content, returns latex.ErrPandocNotFound so the caller can
+// pandoc-routed content, returns pandoc.ErrNotFound so the caller can
 // print a usable install hint and exit non-zero.
 //
-// File extension dispatches the renderer: .tex / .latex go through
-// pandoc; everything else uses goldmark.
+// File extension dispatches the renderer: any extension recognized by
+// pandoc.InputFormat goes through pandoc; everything else uses
+// goldmark.
 func RenderBody(path string) (string, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Sprintf("<p>Error reading file: %s</p>", gohtml.EscapeString(err.Error())), err
 	}
-	if IsLatexPath(path) {
-		rendered, err := latex.Render(context.Background(), content, filepath.Dir(path))
+	if format := pandoc.InputFormat(path); format != "" {
+		rendered, err := pandoc.Render(context.Background(), content, filepath.Dir(path), format)
 		if err != nil {
 			return "", err
 		}
-		return `<div class="latex-block">` + rendered + `</div>`, nil
+		return `<div class="pandoc-block">` + rendered + `</div>`, nil
 	}
 	sourceDir := filepath.Dir(path)
 	stripped := stripFrontmatter(string(content))
 	return renderHTML([]byte(stripped), sourceDir), nil
-}
-
-// IsLatexPath matches .tex / .latex case-insensitively. Exported so the
-// CLI can route LaTeX previews to the HTTP server path (file:// URLs
-// can't load the WASM bundle the client-side renderer needs).
-func IsLatexPath(path string) bool {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".tex", ".latex":
-		return true
-	}
-	return false
 }
 
 // RenderBytes is RenderBody for already-loaded content. Useful for tests and

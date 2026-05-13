@@ -1,4 +1,4 @@
-package latex
+package pandoc
 
 import (
 	"archive/tar"
@@ -11,34 +11,58 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 )
 
-// PandocVersion pins the upstream release auto-fetched into the user
+// Version pins the upstream pandoc release auto-fetched into the user
 // cache. Bumping this invalidates the cache (new versioned dir) but
 // leaves the old install in place; users can `rm -rf ~/.cache/mdp`
 // to reclaim disk.
-const PandocVersion = "3.9.0.2"
+const Version = "3.9.0.2"
 
-// EnsurePandoc returns the path to a usable pandoc binary. Probes
-// $PATH and the per-version cache dir; if neither has one, downloads
-// the upstream static release into the cache. Progress messages go
-// to stderr. Idempotent across calls in the same process.
-func EnsurePandoc(ctx context.Context, stderr io.Writer) (string, error) {
-	if PandocAvailable() {
-		pandocOnceMu.Lock()
-		defer pandocOnceMu.Unlock()
-		return pandocBin, nil
+// ErrFormatUnsupported is returned when neither the host pandoc nor
+// the pinned auto-fetch version can read the requested input format.
+var ErrFormatUnsupported = errors.New("pandoc: format not supported")
+
+// downloadPandocFn lets tests replace the network-touching download
+// step without exposing flag soup. Defaults to downloadPandoc.
+var downloadPandocFn = downloadPandoc
+
+// Ensure returns the path to a pandoc binary that handles format
+// (a `pandoc --from` name like "latex" or "djot"). Probe order:
+//
+//  1. cache (~/.cache/mdp/pandoc-<Version>/pandoc) — always wins
+//  2. $PATH pandoc that lists format in --list-input-formats
+//  3. download the pinned release if its embedded format list
+//     includes format
+//
+// If format is "" the format-support check is skipped; any pandoc is
+// acceptable. Progress messages go to stderr.
+func Ensure(ctx context.Context, format string, stderr io.Writer) (string, error) {
+	probeMu.Lock()
+	defer probeMu.Unlock()
+	if p, ok := findCachedPandoc(); ok {
+		binPath = p
+		return p, nil
 	}
-	pandocOnceMu.Lock()
-	defer pandocOnceMu.Unlock()
-	p, err := downloadPandoc(ctx, stderr)
+	if p, err := exec.LookPath("pandoc"); err == nil {
+		if format == "" || hostSupports(p, format) {
+			binPath = p
+			return p, nil
+		}
+		fmt.Fprintf(stderr, "mdp: system pandoc at %s does not support %q; auto-fetching pinned version %s\n", p, format, Version)
+	}
+	if format != "" && !supportedByPinned[format] {
+		return "", fmt.Errorf("%w: %q not supported by pinned pandoc %s either; upgrade your system pandoc", ErrFormatUnsupported, format, Version)
+	}
+	p, err := downloadPandocFn(ctx, stderr)
 	if err != nil {
 		return "", err
 	}
-	pandocBin = p
+	binPath = p
 	return p, nil
 }
 
@@ -47,7 +71,7 @@ func cachedPandocPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(base, "mdp", "pandoc-"+PandocVersion, "pandoc"), nil
+	return filepath.Join(base, "mdp", "pandoc-"+Version, "pandoc"), nil
 }
 
 func findCachedPandoc() (string, bool) {
@@ -69,16 +93,16 @@ type pandocSource struct {
 }
 
 func pandocSourceFor(goos, goarch string) (pandocSource, error) {
-	base := "https://github.com/jgm/pandoc/releases/download/" + PandocVersion
+	base := "https://github.com/jgm/pandoc/releases/download/" + Version
 	switch {
 	case goos == "linux" && goarch == "amd64":
-		return pandocSource{url: base + "/pandoc-" + PandocVersion + "-linux-amd64.tar.gz", innerMatch: "/bin/pandoc"}, nil
+		return pandocSource{url: base + "/pandoc-" + Version + "-linux-amd64.tar.gz", innerMatch: "/bin/pandoc"}, nil
 	case goos == "linux" && goarch == "arm64":
-		return pandocSource{url: base + "/pandoc-" + PandocVersion + "-linux-arm64.tar.gz", innerMatch: "/bin/pandoc"}, nil
+		return pandocSource{url: base + "/pandoc-" + Version + "-linux-arm64.tar.gz", innerMatch: "/bin/pandoc"}, nil
 	case goos == "darwin" && goarch == "arm64":
-		return pandocSource{url: base + "/pandoc-" + PandocVersion + "-arm64-macOS.zip", isZip: true, innerMatch: "/bin/pandoc"}, nil
+		return pandocSource{url: base + "/pandoc-" + Version + "-arm64-macOS.zip", isZip: true, innerMatch: "/bin/pandoc"}, nil
 	case goos == "darwin" && goarch == "amd64":
-		return pandocSource{url: base + "/pandoc-" + PandocVersion + "-x86_64-macOS.zip", isZip: true, innerMatch: "/bin/pandoc"}, nil
+		return pandocSource{url: base + "/pandoc-" + Version + "-x86_64-macOS.zip", isZip: true, innerMatch: "/bin/pandoc"}, nil
 	}
 	return pandocSource{}, fmt.Errorf("no auto-fetch for %s/%s; install pandoc manually", goos, goarch)
 }

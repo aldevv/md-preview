@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/aldevv/md-preview/internal/render/latex"
+	"github.com/aldevv/md-preview/internal/render/pandoc"
 )
 
 func TestStripFrontmatter(t *testing.T) {
@@ -167,23 +167,28 @@ func TestRenderFencedCode(t *testing.T) {
 	}
 }
 
-// hideFromPath empties PATH for the duration of the test so the
-// pandoc lookup miss path engages (emits a .latex-error div in
-// fences, or returns ErrPandocNotFound from RenderBody).
+// hideFromPath empties PATH and redirects the user cache to a temp
+// dir for the duration of the test so the pandoc lookup miss path
+// engages (emits a .pandoc-error div in fences, or returns ErrNotFound
+// from RenderBody). XDG_CACHE_HOME wins over HOME on Linux; on macOS
+// HOME drives os.UserCacheDir, so we set both.
 func hideFromPath(t *testing.T) {
 	t.Helper()
+	tmp := t.TempDir()
 	t.Setenv("PATH", "/nonexistent")
-	latex.ResetPandocProbe()
+	t.Setenv("XDG_CACHE_HOME", tmp)
+	t.Setenv("HOME", tmp)
+	pandoc.ResetProbe()
 }
 
 func TestRenderFencedLatex_PandocRenders(t *testing.T) {
-	if !latex.PandocAvailable() {
+	if !pandoc.Available() {
 		t.Skip("pandoc not on PATH")
 	}
 	src := "Prose.\n\n```latex\n\\textbf{bold}\n```\n"
 	out := RenderBytes([]byte(src))
-	if !strings.Contains(out, `class="latex-block"`) {
-		t.Errorf("expected latex-block (pandoc-rendered), got: %q", out)
+	if !strings.Contains(out, `class="pandoc-block"`) {
+		t.Errorf("expected pandoc-block (pandoc-rendered), got: %q", out)
 	}
 	if !strings.Contains(out, `<strong>bold</strong>`) {
 		t.Errorf("expected <strong>bold</strong> from pandoc, got: %q", out)
@@ -194,10 +199,10 @@ func TestRenderFencedLatex_PandocMissingShowsError(t *testing.T) {
 	hideFromPath(t)
 	src := "Prose.\n\n```latex\n\\section{X}\n```\n"
 	out := RenderBytes([]byte(src))
-	if !strings.Contains(out, `class="latex-error"`) {
-		t.Errorf("expected .latex-error in fence output, got: %q", out)
+	if !strings.Contains(out, `class="pandoc-error"`) {
+		t.Errorf("expected .pandoc-error in fence output, got: %q", out)
 	}
-	if !strings.Contains(out, "pandoc not found") {
+	if !strings.Contains(out, "pandoc: not found") {
 		t.Errorf("expected install hint in error message, got: %q", out)
 	}
 }
@@ -208,8 +213,8 @@ func TestRenderFencedNonLatex_StaysAsCodeBlock(t *testing.T) {
 	if !strings.Contains(out, `class="language-python"`) {
 		t.Errorf("non-latex fence should stay a code block, got: %q", out)
 	}
-	if strings.Contains(out, `class="latex-block"`) {
-		t.Errorf("python fence got latex-routed, output: %q", out)
+	if strings.Contains(out, `class="pandoc-block"`) {
+		t.Errorf("python fence got pandoc-routed, output: %q", out)
 	}
 }
 
@@ -224,22 +229,89 @@ func TestRenderBody_TexExtensionRequiresPandoc(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for .tex without pandoc, got nil")
 	}
-	if !errors.Is(err, latex.ErrPandocNotFound) {
-		t.Errorf("err = %v, want ErrPandocNotFound", err)
+	if !errors.Is(err, pandoc.ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
 	}
 }
 
 func TestRenderFencedLatex_DataLinePreserved(t *testing.T) {
-	if !latex.PandocAvailable() {
+	if !pandoc.Available() {
 		t.Skip("pandoc not on PATH")
 	}
 	src := "prose\n\n```latex\n\\section{X}\n```\n"
 	out := RenderBytes([]byte(src))
-	if !strings.Contains(out, `class="latex-block"`) {
-		t.Fatalf("expected latex-block wrapper: %q", out)
+	if !strings.Contains(out, `class="pandoc-block"`) {
+		t.Fatalf("expected pandoc-block wrapper: %q", out)
 	}
 	if !strings.Contains(out, `data-line="3"`) {
-		t.Errorf(`expected data-line="3" on latex-block, got: %q`, out)
+		t.Errorf(`expected data-line="3" on pandoc-block, got: %q`, out)
+	}
+}
+
+func TestRenderFencedTypst_PandocRenders(t *testing.T) {
+	if !pandoc.Available() {
+		t.Skip("pandoc not on PATH")
+	}
+	src := "prose\n\n```typst\n= Hello\n\n*bold* text\n```\n"
+	out := RenderBytes([]byte(src))
+	if !strings.Contains(out, `class="pandoc-block"`) {
+		t.Errorf("expected pandoc-block wrapper for typst fence, got: %q", out)
+	}
+	if !strings.Contains(out, `<strong>bold</strong>`) {
+		t.Errorf("expected <strong>bold</strong> from typst fence, got: %q", out)
+	}
+}
+
+func TestRenderFencedMermaid_EmitsMermaidPre(t *testing.T) {
+	src := "prose\n\n```mermaid\nflowchart TD\n  A-->B\n```\n"
+	out := RenderBytes([]byte(src))
+	if !strings.Contains(out, `<pre class="mermaid"`) {
+		t.Errorf("expected pre.mermaid wrapper, got: %q", out)
+	}
+	if !strings.Contains(out, `flowchart TD`) {
+		t.Errorf("expected raw mermaid source preserved, got: %q", out)
+	}
+	if !strings.Contains(out, `data-line="3"`) {
+		t.Errorf(`expected data-line="3" on mermaid pre, got: %q`, out)
+	}
+}
+
+func TestRenderMath_DelimitersPreserved(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want []string
+	}{
+		{
+			name: "inline-parens",
+			src:  "prose \\(a^2 + b^2\\) prose\n",
+			want: []string{`class="math-inline"`, `\(a^2 + b^2\)`},
+		},
+		{
+			name: "block-brackets",
+			src:  "\\[\n  e^{i\\pi} + 1 = 0\n\\]\n",
+			want: []string{`class="math-display"`, `e^{i\pi}`, `\[`, `\]`},
+		},
+		{
+			name: "block-dollars",
+			src:  "$$\n\\int e^{-x^2}\\,dx = \\sqrt{\\pi}\n$$\n",
+			want: []string{`class="math-display"`, `\sqrt{\pi}`, `\,dx`},
+		},
+		{
+			name: "inline-dollars",
+			src:  "prose $x^2$ prose\n",
+			want: []string{`class="math-inline"`, `$x^2$`},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := RenderBytes([]byte(tc.src))
+			for _, w := range tc.want {
+				if !strings.Contains(out, w) {
+					t.Errorf("math output missing %q\nout: %s", w, out)
+				}
+			}
+		})
 	}
 }
 

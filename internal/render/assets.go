@@ -31,3 +31,27 @@ var katexScript string
 
 //go:embed assets/katex-auto-render.min.js
 var katexAutoRenderScript string
+
+// mermaid 11.x (https://github.com/mermaid-js/mermaid), inlined for
+// the same reason as highlight.js / KaTeX: zero network on render.
+// ~3.3 MiB. Only loaded into the page when a ```mermaid fence is
+// present (hasMermaid in page.go gates this).
+
+//go:embed assets/mermaid.min.js
+var mermaidScript string
+
+// Page-template CSS lives in assets/css/ as actual .css files so an
+// editor can syntax-highlight, lint, and format it. The Go code just
+// holds the embedded strings.
+
+//go:embed assets/css/theme-dark.css
+var CSSDark string
+
+//go:embed assets/css/theme-light.css
+var CSSLight string
+
+//go:embed assets/css/markdown.css
+var CSSCommon string
+
+//go:embed assets/css/pandoc.css
+var pandocCSS string
