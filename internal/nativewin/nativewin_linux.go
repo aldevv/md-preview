@@ -34,17 +34,19 @@ var (
 	loadOnce sync.Once
 	loadErr  error
 
-	gtkInitCheck         func(argc *int32, argv unsafe.Pointer) int32
-	gtkWindowNew         func(typ int32) uintptr
-	gtkWindowSetTitle    func(window uintptr, title string)
-	gtkWindowSetDefSize  func(window uintptr, w, h int32)
-	gtkContainerAdd      func(container, widget uintptr)
-	gtkWidgetShowAll     func(widget uintptr)
-	gtkMain              func()
-	gtkMainQuit          func()
-	webkitWebViewNew     func() uintptr
-	webkitWebViewLoadURI func(view uintptr, uri string)
-	gSignalConnectData   func(instance uintptr, signal string, handler uintptr, data uintptr, destroyData uintptr, flags int32) uint64
+	gtkInitCheck                                func(argc *int32, argv unsafe.Pointer) int32
+	gtkWindowNew                                func(typ int32) uintptr
+	gtkWindowSetTitle                           func(window uintptr, title string)
+	gtkWindowSetDefSize                         func(window uintptr, w, h int32)
+	gtkContainerAdd                             func(container, widget uintptr)
+	gtkWidgetShowAll                            func(widget uintptr)
+	gtkMain                                     func()
+	gtkMainQuit                                 func()
+	webkitWebViewNew                            func() uintptr
+	webkitWebViewLoadURI                        func(view uintptr, uri string)
+	webkitWebViewGetSettings                    func(view uintptr) uintptr
+	webkitSettingsSetAllowFileAccessFromFileURL func(settings uintptr, allowed int32)
+	gSignalConnectData                          func(instance uintptr, signal string, handler uintptr, data uintptr, destroyData uintptr, flags int32) uint64
 
 	availOnce sync.Once
 	availOK   bool
@@ -93,6 +95,8 @@ func dlopenAll() error {
 	purego.RegisterLibFunc(&gtkMainQuit, libgtk, "gtk_main_quit")
 	purego.RegisterLibFunc(&webkitWebViewNew, libwebkit, "webkit_web_view_new")
 	purego.RegisterLibFunc(&webkitWebViewLoadURI, libwebkit, "webkit_web_view_load_uri")
+	purego.RegisterLibFunc(&webkitWebViewGetSettings, libwebkit, "webkit_web_view_get_settings")
+	purego.RegisterLibFunc(&webkitSettingsSetAllowFileAccessFromFileURL, libwebkit, "webkit_settings_set_allow_file_access_from_file_urls")
 	purego.RegisterLibFunc(&gSignalConnectData, libgobject, "g_signal_connect_data")
 	return nil
 }
@@ -146,6 +150,10 @@ func Open(opts Options) error {
 
 	view := webkitWebViewNew()
 	gtkContainerAdd(window, view)
+
+	// Needed so file:// HTML can fetch sibling pandoc.wasm.gz + JS.
+	webkitSettingsSetAllowFileAccessFromFileURL(webkitWebViewGetSettings(view), 1)
+
 	webkitWebViewLoadURI(view, opts.URL)
 
 	// "destroy" fires after the user clicks close; quit the main loop so

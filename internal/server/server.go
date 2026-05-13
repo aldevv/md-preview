@@ -193,28 +193,12 @@ func newHandler(s *state) http.Handler {
 	return mux
 }
 
-// latexAssetHandler serves the embedded WASM/JS/CSS bundle under /_/.
-// Sets explicit MIME types: http.FileServer's default content-type
-// detection misses .wasm and serves it as application/octet-stream,
-// which breaks WebAssembly.instantiateStreaming's MIME check.
-//
-// The .wasm request gets short-circuited: pandoc.wasm is stored
-// gzipped in the embedded FS (as pandoc.wasm.gz, ~16 MB vs ~58 MB
-// raw). The handler reads the .gz file, advertises
-// Content-Encoding: gzip + Content-Length of the gzipped bytes,
-// and lets the browser transparently decode during streaming compile.
-// http.ServeContent would re-sniff content type from the gzip magic
-// and serve as application/x-gzip, so we bypass it for the .wasm path.
 func latexAssetHandler() http.HandlerFunc {
 	fsys := http.FS(latex.AssetsFS())
 	return func(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimPrefix(r.URL.Path, "/_/")
 		if name == "" || strings.Contains(name, "..") {
 			http.NotFound(w, r)
-			return
-		}
-		if strings.HasSuffix(name, ".wasm") {
-			serveGzippedWasm(w, r, fsys, name)
 			return
 		}
 		f, err := fsys.Open(name)
@@ -229,6 +213,8 @@ func latexAssetHandler() http.HandlerFunc {
 			return
 		}
 		switch {
+		case strings.HasSuffix(name, ".wasm.gz"):
+			w.Header().Set("Content-Type", "application/gzip")
 		case strings.HasSuffix(name, ".js"):
 			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 		case strings.HasSuffix(name, ".css"):
@@ -236,33 +222,6 @@ func latexAssetHandler() http.HandlerFunc {
 		}
 		http.ServeContent(w, r, name, info.ModTime(), f.(io.ReadSeeker))
 	}
-}
-
-// serveGzippedWasm streams the pre-gzipped wasm bytes with the
-// headers WebAssembly.instantiateStreaming expects. Ranges aren't
-// supported: range bytes address the encoded representation, but no
-// client knows how to ask for "decoded bytes M-N" given only the
-// encoded view, so we don't advertise Accept-Ranges. Streaming
-// instantiate does not issue range requests in practice.
-func serveGzippedWasm(w http.ResponseWriter, r *http.Request, fsys http.FileSystem, name string) {
-	gz, err := fsys.Open(name + ".gz")
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	defer gz.Close()
-	info, err := gz.Stat()
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	h := w.Header()
-	h.Set("Content-Type", "application/wasm")
-	h.Set("Content-Encoding", "gzip")
-	h.Set("Content-Length", strconv.FormatInt(info.Size(), 10))
-	h.Set("Vary", "Accept-Encoding")
-	w.WriteHeader(http.StatusOK)
-	_, _ = io.Copy(w, gz)
 }
 
 func (s *state) handleIndex(w http.ResponseWriter, r *http.Request) {

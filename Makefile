@@ -1,4 +1,4 @@
-.PHONY: build install test test-go test-lua test-e2e test-all lint fmt fmt-check clean pandoc-wasm
+.PHONY: build install install-dev test test-go test-lua test-e2e test-all lint fmt fmt-check clean pandoc-wasm
 
 PREFIX ?= $(HOME)/.local
 BIN := $(PREFIX)/bin
@@ -27,6 +27,18 @@ install:
 	rm -f $(BIN)/mdp
 	GOBIN=$(BIN) go install $(GOFLAGS) -ldflags '$(LDFLAGS)' ./cmd/mdp
 	@echo "[mdp] installed $(BIN)/mdp ($(VERSION))"
+
+# Install the current branch as `mdp-dev` so it can run side-by-side
+# with a stable `mdp` install. Version is stamped with branch + short
+# sha so `mdp-dev version` reveals what's actually running.
+DEV_BRANCH := $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null || echo detached)
+DEV_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+DEV_VERSION := dev-$(DEV_BRANCH)-$(DEV_SHA)
+install-dev:
+	mkdir -p $(BIN)
+	go build $(GOFLAGS) -ldflags '-s -w -X main.version=$(DEV_VERSION)' \
+		-o $(BIN)/mdp-dev ./cmd/mdp
+	@echo "[mdp] installed $(BIN)/mdp-dev ($(DEV_VERSION))"
 
 test: test-go
 

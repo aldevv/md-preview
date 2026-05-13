@@ -142,6 +142,8 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 			return runSkill(args[1:], stdout, stderr, env)
 		case "update":
 			return runUpdate(args[1:], stdout, stderr, env)
+		case "_open-window":
+			return runOpenWindow(args[1:], stderr, env)
 		case "help":
 			fmt.Fprint(stdout, usage)
 			return 0
@@ -264,19 +266,12 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 		fmt.Fprintf(stderr, "mdp: %v\n", err)
 	}
 
-	// file:// origins can't fetch the WASM bundle the client-side
-	// LaTeX renderer needs (browsers gate WebAssembly.instantiate
-	// streaming on http(s):// schemes and CORS-safe MIME types).
-	// When the body needs LaTeX, escalate to the same one-shot HTTP
-	// server `mdp watch` uses — minus the auto-watch loop, since
-	// static mode is a one-render preview.
 	if latex.HasLatex(body) {
 		if printPath {
-			fmt.Fprintln(stderr, "mdp: -p/--print is not supported for LaTeX previews (needs a live server for pandoc.wasm)")
+			fmt.Fprintln(stderr, "mdp: -p/--print is not supported for LaTeX previews")
 			return 1
 		}
-		fmt.Fprintln(stderr, "mdp: LaTeX detected; starting preview server (Ctrl-C to exit)")
-		return runStaticServer(src, theme, cfg, env, stderr)
+		return runStaticLatex(src, body, theme, cfg, env, stderr)
 	}
 
 	page := render.BuildPage(body, theme, 0, config.ExtraCSS(cfg, stderr), cfg.Colemak)
@@ -377,34 +372,51 @@ func spawnDetached(argv []string) error {
 	return cmd.Start()
 }
 
-// runStaticServer is the auto-promotion path for static-mode previews
-// that contain LaTeX. file:// URLs can't fetch pandoc.wasm, so when
-// the rendered body has a latex-pending placeholder we run the same
-// HTTP server mdp watch uses. The non-LaTeX static path still goes
-// through the original write-tmp-and-open flow.
-//
-// Prefers the native window because a one-shot LaTeX preview is the
-// classic "open this file in a viewer" UX: chromeless, single-window,
-// closes cleanly. Falls back to a browser launch (same fallback that
-// runWatchWithNativeWindow uses) when env.OpenWindow is unset or the
-// underlying GTK/WebKit libs aren't installed.
-//
-// Note: this is the one place the native window engages without
-// MDP_NATIVE=1. The watch subcommand stays browser-default for
-// backward compatibility; static-mode LaTeX is brand-new behavior and
-// the native window is the better default for it.
-func runStaticServer(src, theme string, cfg config.Config, env Environment, stderr io.Writer) int {
-	opts := server.Options{
-		File:    src,
-		Port:    0,
-		Theme:   theme,
-		Colemak: cfg.Colemak,
-		Watch:   true,
+// runStaticLatex writes the LaTeX bundle's sibling assets to /tmp,
+// writes a small HTML pointing at them, and opens the file:// URL in
+// the native window (preferred) or the configured browser. Returns
+// immediately like the markdown static path; the child process owns
+// the window lifetime.
+func runStaticLatex(src, body, theme string, cfg config.Config, env Environment, stderr io.Writer) int {
+	assetsDir, err := latex.WriteSiblingAssets(env.TempDir())
+	if err != nil {
+		fmt.Fprintf(stderr, "mdp: writing latex assets: %v\n", err)
+		return 1
 	}
-	if env.OpenWindow != nil {
-		return runWatchWithNativeWindow(opts, cfg, env, stderr)
+	page := render.BuildPageWithAssets(body, theme, 0, config.ExtraCSS(cfg, stderr), cfg.Colemak, "file://"+assetsDir+"/")
+	tmpPath := tmpHTMLPath(env.TempDir(), src)
+	if err := writeTmpFile(tmpPath, []byte(page)); err != nil {
+		fmt.Fprintf(stderr, "mdp: writing tmp: %v\n", err)
+		return 1
 	}
-	return runWatchWithBrowser(opts, cfg, env, stderr)
+	url := "file://" + tmpPath
+	if nativewin.Available() {
+		if exe, err := env.Executable(); err == nil {
+			if err := env.Spawn([]string{exe, "_open-window", url}); err == nil {
+				return 0
+			}
+		}
+	}
+	argv := config.BrowserCmd(cfg.Browser, url, env.LookPath, env.GOOS, stderr)
+	if err := env.Spawn(argv); err != nil {
+		fmt.Fprintf(stderr, "mdp: launching browser: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// runOpenWindow is the child-process entry point for the detached
+// native-window host spawned by runStaticLatex. Blocks on gtk_main
+// until the user closes the window, then exits.
+func runOpenWindow(args []string, stderr io.Writer, env Environment) int {
+	if len(args) < 1 || env.OpenWindow == nil {
+		return 1
+	}
+	if err := env.OpenWindow(args[0]); err != nil {
+		fmt.Fprintf(stderr, "mdp: open-window: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 // runWatchSubcommand handles `mdp watch [-t theme] [file]`. Picks a file

@@ -1,64 +1,41 @@
-// Package latex emits client-side WASM placeholders for LaTeX content
-// in mdp's preview page and exposes the embedded pandoc-wasm bundle.
-//
-// The previous version of this package shelled out to a host-installed
-// pandoc binary. That worked but required users to install pandoc
-// separately. The current version ships pandoc's official wasm32-wasi
-// build inside the mdp binary; the browser executes it via @bjorn3's
-// WASI shim and DOMPurify-sanitizes the HTML before injection.
+// Package latex emits client-side WASM placeholders for LaTeX in mdp
+// previews and exposes the embedded pandoc-wasm bundle.
 package latex
 
 import (
+	"crypto/sha256"
 	"embed"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	gohtml "html"
+	"io"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
-// AssetsFS holds pandoc.wasm.gz + the JS bridge + WASI shim + DOMPurify
-// + mdp's glue script. Sourced from internal/render/latex/wasm/.
-//
-// pandoc.wasm.gz is the gzip -9'd Tweag/Pandoc WASM build (GPL-2.0+);
-// it's shipped as a static asset served with Content-Encoding: gzip
-// so the browser decodes on the fly via WebAssembly.instantiateStreaming.
-// Storing gzipped (~16 MB) instead of raw (~58 MB) saves ~42 MB in the
-// mdp binary at zero runtime cost (browsers transparently decode gzip
-// in streaming WASM instantiation).
-//
-// pandoc.js (MIT, Tweag) is the upstream interface module with one
-// local-import rewrite. wasi-shim.js is the jsdelivr ESM bundle of
-// @bjorn3/browser_wasi_shim (Apache-2.0/MIT). purify.min.js is
-// DOMPurify (Apache-2.0/MPL). latex-render.js is mdp's own glue.
-//
 //go:embed wasm
 var assets embed.FS
 
-// AssetsFS returns the embedded asset tree rooted at "wasm/" so the
-// server can serve every file via http.StripPrefix("/_/").
+// Version pins the pandoc.wasm artifact this build embeds. Used to
+// version the sibling-asset cache dir so multiple mdp installs can
+// coexist and stale blobs are obvious. Bump in lockstep with the
+// Makefile's PANDOC_WASM_VERSION.
+const Version = "3.9.0.2"
+
 func AssetsFS() fs.FS {
 	sub, err := fs.Sub(assets, "wasm")
 	if err != nil {
-		// fs.Sub only errors on a malformed path, which is a compile-time
-		// constant here; panic so a build issue fails loudly rather than
-		// silently dropping LaTeX support at runtime.
 		panic(fmt.Errorf("latex: embed sub: %w", err))
 	}
 	return sub
 }
 
-// Placeholder wraps a LaTeX source fragment in a <div class="latex-pending">
-// the browser-side latex-render.js will swap with pandoc.wasm's HTML output.
-//
-// The source is base64-encoded so arbitrary content (newlines, quotes,
-// braces, raw HTML inside \begin{verbatim}) survives a single DOM
-// attribute round-trip without needing per-character escaping.
-//
-// dataLine is the 1-indexed source line of the fence/document opening;
-// it stamps the placeholder for scroll-sync, and is preserved on the
-// rendered wrapper. Pass an empty string for whole-.tex documents
-// where line-level scroll-sync is deferred to v2.
+// Placeholder wraps LaTeX source as a <div class="latex-pending">
+// that the browser swaps with rendered HTML. The source is base64'd
+// so newlines/quotes/braces survive the DOM attribute round-trip.
 func Placeholder(src []byte, dataLine string) string {
 	b64 := base64.StdEncoding.EncodeToString(src)
 	var b strings.Builder
@@ -74,9 +51,62 @@ func Placeholder(src []byte, dataLine string) string {
 	return b.String()
 }
 
-// HasLatex reports whether body contains any latex-pending placeholder
-// the client-side renderer must process. BuildPage uses this to skip
-// the ~58 MB pandoc.wasm bundle for the math-free common case.
 func HasLatex(body string) bool {
 	return strings.Contains(body, `class="latex-pending"`)
+}
+
+// WriteSiblingAssets ensures the WASM + JS bundle lives at
+// <base>/mdp-pandoc-<Version>/ and returns that directory.
+// Idempotent: files matching the embedded size are left alone, so
+// re-runs across many mdp invocations are cheap.
+func WriteSiblingAssets(base string) (string, error) {
+	dir := filepath.Join(base, "mdp-pandoc-"+Version)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	fsys := AssetsFS()
+	entries, err := fs.ReadDir(fsys, ".")
+	if err != nil {
+		return "", err
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if err := writeIfChanged(fsys, dir, e.Name()); err != nil {
+			return "", err
+		}
+	}
+	return dir, nil
+}
+
+func writeIfChanged(fsys fs.FS, dir, name string) error {
+	src, err := fs.ReadFile(fsys, name)
+	if err != nil {
+		return err
+	}
+	dst := filepath.Join(dir, name)
+	if cur, err := os.ReadFile(dst); err == nil && len(cur) == len(src) {
+		return nil
+	}
+	return os.WriteFile(dst, src, 0o644)
+}
+
+// AssetsDigest returns a stable short hex digest of the embedded
+// bundle. Useful to invalidate caches when the embed changes between
+// mdp builds (e.g. a glue-script tweak that didn't bump Version).
+func AssetsDigest() string {
+	h := sha256.New()
+	fsys := AssetsFS()
+	entries, _ := fs.ReadDir(fsys, ".")
+	for _, e := range entries {
+		f, err := fsys.Open(e.Name())
+		if err != nil {
+			continue
+		}
+		_, _ = io.WriteString(h, e.Name())
+		_, _ = io.Copy(h, f)
+		f.Close()
+	}
+	return hex.EncodeToString(h.Sum(nil))[:12]
 }

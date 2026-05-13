@@ -53,18 +53,14 @@ const fds = [
 ];
 const options = { debug: false };
 const wasi = new WASI(args, env, fds, options);
-// mdp: use an import.meta.url-resolved absolute URL instead of the
-// upstream "./pandoc.wasm" relative path. Some Chrome versions reject
-// the relative path's response MIME inside instantiateStreaming
-// (despite the response actually being application/wasm); resolving
-// against import.meta.url sidesteps it.
-const _pandocWasmUrl = new URL("./pandoc.wasm", import.meta.url);
-const { instance } = await WebAssembly.instantiateStreaming(
-  fetch(_pandocWasmUrl),
-  {
-    wasi_snapshot_preview1: wasi.wasiImport,
-  }
-);
+// mdp: decompress in JS so the same path works for HTTP and file://.
+const _pandocResp = await fetch(new URL("./pandoc.wasm.gz", import.meta.url));
+const _pandocBytes = await new Response(
+  _pandocResp.body.pipeThrough(new DecompressionStream("gzip"))
+).arrayBuffer();
+const { instance } = await WebAssembly.instantiate(_pandocBytes, {
+  wasi_snapshot_preview1: wasi.wasiImport,
+});
 
 wasi.initialize(instance);
 instance.exports.__wasm_call_ctors();

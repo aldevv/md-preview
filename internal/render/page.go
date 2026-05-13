@@ -247,14 +247,18 @@ ws.onclose = () => {
 };
 `
 
-// BuildPage wraps an HTML body in the full preview page template.
-//
-// theme selects the color palette: "dark" (default) or "light".
-// wsPort > 0 embeds the WebSocket scroll/reload client; pass 0 for the
-// static CLI preview, which omits the WebSocket script entirely.
-// extraCSS is appended after the default CSS so it wins via cascade.
-// colemak swaps the in-page nav keys from j/k/l to n/e/i.
+// BuildPage wraps an HTML body in the preview page template using
+// /_/ as the LaTeX-assets URL prefix (server mode).
 func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool) string {
+	return BuildPageWithAssets(body, theme, wsPort, extraCSS, colemak, "/_/")
+}
+
+// BuildPageWithAssets is BuildPage with a caller-provided URL prefix
+// for the LaTeX bundle (pandoc.wasm.gz, pandoc.js, etc). Use "/_/"
+// for HTTP-served previews; for static file:// previews pass an
+// absolute file:// URL pointing at the sibling-assets dir from
+// latex.WriteSiblingAssets.
+func BuildPageWithAssets(body, theme string, wsPort int, extraCSS string, colemak bool, assetsPrefix string) string {
 	cssVars := CSSDark
 	hljsThemeCSS := hljsThemeDarkCSS
 	if theme == "light" {
@@ -287,7 +291,7 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool) st
 	// available even if the user toggles content via WS reload.
 	latexScripts := ""
 	if latex.HasLatex(body) {
-		latexScripts = latexScriptTags
+		latexScripts = fmt.Sprintf(latexScriptTags, assetsPrefix, assetsPrefix)
 	}
 
 	return fmt.Sprintf(`<!DOCTYPE html>
@@ -361,13 +365,11 @@ const latexCSS = `
 }
 `
 
-// latexScriptTags wires DOMPurify (synchronous so window.DOMPurify
-// is set before the module runs) followed by the ES-module renderer.
-// purify.min.js is a UMD bundle, latex-render.js is the only
-// type="module" entry — it transitively pulls pandoc.js and
-// wasi-shim.js via local imports.
-const latexScriptTags = `<script src="/_/purify.min.js"></script>
-<script type="module" src="/_/latex-render.js"></script>
+// %s twice: gets the assets URL prefix. purify.min.js must load
+// synchronously (no defer) so window.DOMPurify is set before the
+// module's top-level await fires.
+const latexScriptTags = `<script src="%spurify.min.js"></script>
+<script type="module" src="%slatex-render.js"></script>
 `
 
 // hasMath checks whether the rendered body has any math markers worth

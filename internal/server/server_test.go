@@ -306,69 +306,31 @@ func TestHandler_PostRender_RejectsPathOutsideServedDir(t *testing.T) {
 	}
 }
 
-func TestHandler_LatexAsset_PandocWasm(t *testing.T) {
+func TestHandler_LatexAsset_PandocWasmGz(t *testing.T) {
 	dir := t.TempDir()
 	file := writeMD(t, dir, "doc.md", "# Hello\n")
 	s := newTestState(t, file)
 	srv := httptest.NewServer(newHandler(s))
 	defer srv.Close()
 
-	resp, err := http.Get(srv.URL + "/_/pandoc.wasm")
+	resp, err := http.Get(srv.URL + "/_/pandoc.wasm.gz")
 	if err != nil {
-		t.Fatalf("GET /_/pandoc.wasm: %v", err)
+		t.Fatalf("GET /_/pandoc.wasm.gz: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	if ct := resp.Header.Get("Content-Type"); ct != "application/wasm" {
-		t.Errorf("Content-Type = %q, want application/wasm "+
-			"(WebAssembly.instantiateStreaming rejects other MIMEs)", ct)
+	if ct := resp.Header.Get("Content-Type"); ct != "application/gzip" {
+		t.Errorf("Content-Type = %q, want application/gzip", ct)
 	}
-	first8 := make([]byte, 8)
-	if _, err := io.ReadFull(resp.Body, first8); err != nil {
-		t.Fatalf("read first 8 bytes: %v", err)
-	}
-	// WASM magic: \0asm\1\0\0\0. http.Client decodes gzip transparently
-	// when Accept-Encoding wasn't manually set, so the body the test
-	// sees is the decompressed wasm regardless of wire encoding.
-	if string(first8[:4]) != "\x00asm" {
-		t.Errorf("body does not start with WASM magic; got %x", first8[:4])
-	}
-}
-
-func TestHandler_LatexAsset_PandocWasm_GzipWire(t *testing.T) {
-	dir := t.TempDir()
-	file := writeMD(t, dir, "doc.md", "# Hello\n")
-	s := newTestState(t, file)
-	srv := httptest.NewServer(newHandler(s))
-	defer srv.Close()
-
-	// Send our own Accept-Encoding to disable http.Client's
-	// auto-decompression — we want to inspect the wire encoding
-	// to confirm pandoc.wasm is actually shipped gzipped (the
-	// whole point of the .gz embed trick, ~42 MB saved on disk).
-	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/_/pandoc.wasm", nil)
-	req.Header.Set("Accept-Encoding", "gzip")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("GET /_/pandoc.wasm: %v", err)
-	}
-	defer resp.Body.Close()
-	if ce := resp.Header.Get("Content-Encoding"); ce != "gzip" {
-		t.Errorf("Content-Encoding = %q, want gzip", ce)
-	}
-	if ct := resp.Header.Get("Content-Type"); ct != "application/wasm" {
-		t.Errorf("Content-Type = %q, want application/wasm even with gzip CE", ct)
-	}
-	if v := resp.Header.Get("Vary"); !strings.Contains(v, "Accept-Encoding") {
-		t.Errorf("Vary = %q, want Accept-Encoding", v)
+	if ce := resp.Header.Get("Content-Encoding"); ce != "" {
+		t.Errorf("Content-Encoding = %q, want empty (JS decompresses)", ce)
 	}
 	first2 := make([]byte, 2)
 	if _, err := io.ReadFull(resp.Body, first2); err != nil {
 		t.Fatalf("read first 2 bytes: %v", err)
 	}
-	// gzip magic: 0x1f 0x8b
 	if first2[0] != 0x1f || first2[1] != 0x8b {
 		t.Errorf("body does not start with gzip magic; got %x", first2)
 	}
