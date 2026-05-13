@@ -123,6 +123,8 @@ Subcommands:
                                     other automation driving mdp).
   mdp serve <file> <port> <theme>   Start the preview server (used by the
                                     md-preview.nvim Neovim plugin).
+  mdp pdf <file> [-o output.pdf]    Render the markdown file to PDF
+                                    using headless Chrome/Chromium.
 `
 
 func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) int {
@@ -137,6 +139,8 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 			return runServe(args[1:], stderr)
 		case "watch":
 			return runWatchSubcommand(args[1:], stdout, stderr, env)
+		case "pdf":
+			return runPDF(args[1:], stdout, stderr, env)
 		case "skill":
 			return runSkill(args[1:], stdout, stderr, env)
 		case "update":
