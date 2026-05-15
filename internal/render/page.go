@@ -55,34 +55,6 @@ func vimKeys(colemak bool) string {
 	return s
 }
 
-// toastCSS styles the corner toast used by mdpShowToast (link error
-// notices, etc.). Hidden by default, slides in from below on
-// .visible.
-const toastCSS = `
-#mdp-toast {
-  position: fixed;
-  bottom: 24px;
-  right: 24px;
-  z-index: 9999;
-  max-width: 480px;
-  padding: 12px 16px;
-  border-radius: 6px;
-  background: var(--color-alert-caution);
-  color: #fff;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-  font-size: 14px;
-  line-height: 1.4;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-  opacity: 0;
-  transform: translateY(8px);
-  transition: opacity 0.2s ease-out, transform 0.2s ease-out;
-}
-#mdp-toast.visible {
-  opacity: 1;
-  transform: translateY(0);
-}
-`
-
 // wsScriptTemplate is the WebSocket scroll/reload client; __PORT__ is replaced
 // with the server port at runtime.
 const wsScriptTemplate = `
@@ -136,6 +108,39 @@ ws.onmessage = (e) => {
         });
     }
 };
+// Anchor the initial history entry to the current file so popstate
+// after one or more navigations can restore the right document.
+if (window.mdpCurrentFile && history.state == null) {
+    history.replaceState({mdpFile: window.mdpCurrentFile}, '', '');
+}
+
+// popstate fires on back/forward. Re-render whatever file the
+// previous entry pointed at; the reload broadcast then swaps the
+// page content. If the state has no mdpFile (i.e. we ended up at
+// pre-mdp history), do nothing and let the browser navigate away.
+window.addEventListener('popstate', (e) => {
+    if (e.state && e.state.mdpFile) {
+        const tgt = e.state.mdpFile;
+        // Slide mdpIdx along the existing stack so the buttons
+        // reflect where we are. Match against neighbouring entries
+        // (one back or one forward); fall back to a search.
+        if (mdpIdx >= 1 && mdpStack[mdpIdx - 1] === tgt) {
+            mdpIdx--;
+        } else if (mdpIdx >= 0 && mdpStack[mdpIdx + 1] === tgt) {
+            mdpIdx++;
+        } else {
+            const found = mdpStack.indexOf(tgt);
+            if (found >= 0) mdpIdx = found;
+        }
+        mdpSaveNav();
+        fetch('/render', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({file: tgt})
+        });
+    }
+});
+
 // Click-to-navigate: any <a> inside #content whose href is a local
 // path POSTs to /render. The server's reload broadcast then swaps
 // the page content; on 4xx the server's error message is surfaced
@@ -167,7 +172,13 @@ document.getElementById('content').addEventListener('click', (e) => {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({file: target})
     }).then(async (r) => {
-        if (r.ok) return;
+        if (r.ok) {
+            // Push a new entry so the browser back button (and our
+            // back chrome button) returns to the previous file.
+            history.pushState({mdpFile: target}, '', '');
+            mdpNavigatedTo(target);
+            return;
+        }
         let msg = 'navigation failed (' + r.status + ')';
         try {
             const data = await r.json();
@@ -255,12 +266,61 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, cu
 </style>
 </head>
 <body>
+<button id="mdp-back" class="mdp-nav-btn" aria-label="Back" title="Back" hidden>&#8249;</button>
+<button id="mdp-fwd" class="mdp-nav-btn" aria-label="Forward" title="Forward" hidden>&#8250;</button>
 <div id="content" class="markdown-body">
 %s
 </div>
 <div id="mdp-toast" hidden></div>
 <script>
 window.mdpCurrentFile = %s;
+// mdpStack + mdpIdx track the user's nav path so back/forward
+// buttons reflect actual nav state (not browser history length,
+// which includes pre-mdp entries). sessionStorage persists across
+// real page loads in static mode; in WS mode the page never
+// reloads but stays consistent with the same data.
+let mdpStack = JSON.parse(sessionStorage.getItem('mdpStack') || '[]');
+let mdpIdx = parseInt(sessionStorage.getItem('mdpIdx') || '-1', 10);
+const mdpBackBtn = document.getElementById('mdp-back');
+const mdpFwdBtn = document.getElementById('mdp-fwd');
+function mdpSaveNav() {
+  sessionStorage.setItem('mdpStack', JSON.stringify(mdpStack));
+  sessionStorage.setItem('mdpIdx', String(mdpIdx));
+  mdpUpdateNavButtons();
+}
+function mdpUpdateNavButtons() {
+  if (mdpBackBtn) mdpBackBtn.hidden = mdpIdx <= 0;
+  if (mdpFwdBtn)  mdpFwdBtn.hidden  = mdpIdx >= mdpStack.length - 1;
+}
+function mdpNavigatedTo(target) {
+  // A new navigation (not back/forward): discard forward history,
+  // append, advance idx.
+  if (mdpIdx >= 0 && mdpStack[mdpIdx] === target) return;
+  mdpStack = mdpStack.slice(0, mdpIdx + 1);
+  mdpStack.push(target);
+  mdpIdx = mdpStack.length - 1;
+  mdpSaveNav();
+}
+// Sync stack with the file we ended up on (covers static-mode
+// back/forward navigations between separate file:// pages).
+(function () {
+  const cur = window.mdpCurrentFile;
+  if (!cur) return;
+  if (mdpIdx >= 0 && mdpStack[mdpIdx] === cur) {
+    // in sync
+  } else if (mdpIdx >= 1 && mdpStack[mdpIdx - 1] === cur) {
+    mdpIdx--;
+  } else if (mdpIdx >= 0 && mdpStack[mdpIdx + 1] === cur) {
+    mdpIdx++;
+  } else {
+    mdpStack = mdpStack.slice(0, mdpIdx + 1);
+    mdpStack.push(cur);
+    mdpIdx = mdpStack.length - 1;
+  }
+  mdpSaveNav();
+})();
+if (mdpBackBtn) mdpBackBtn.addEventListener('click', () => window.history.back());
+if (mdpFwdBtn)  mdpFwdBtn.addEventListener('click',  () => window.history.forward());
 function mdpShowToast(msg) {
   const el = document.getElementById('mdp-toast');
   if (!el) return;
@@ -307,7 +367,7 @@ mdpRenderMath();
 %s
 </script>
 </body>
-</html>`, hljsThemeCSS, cssVars, CSSCommon, pandocCSS, toastCSS, katexCSSOut, extraCSS, body, currentFileJS, hljsScript, katexJSOut, katexAutoRenderJSOut, mermaidJSOut, mermaidInit, vimKeys(colemak), wsScript)
+</html>`, hljsThemeCSS, cssVars, CSSCommon, pandocCSS, chromeCSS, katexCSSOut, extraCSS, body, currentFileJS, hljsScript, katexJSOut, katexAutoRenderJSOut, mermaidJSOut, mermaidInit, vimKeys(colemak), wsScript)
 }
 
 // hasMermaid reports whether the rendered body contains a mermaid

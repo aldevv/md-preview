@@ -55,3 +55,6 @@ var CSSCommon string
 
 //go:embed assets/css/pandoc.css
 var pandocCSS string
+
+//go:embed assets/css/chrome.css
+var chromeCSS string
