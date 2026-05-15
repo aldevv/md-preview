@@ -13,6 +13,9 @@ import (
 // The __DOWN__/__UP__/__RIGHT__ placeholders are replaced with j/k/l
 // (qwerty) or n/e/i (colemak); h, d/u, g/G, and q are kept as-is in both
 // layouts (either home-row in colemak already or kept for mnemonic).
+// __RELOAD_CASE__ becomes the `r` reload binding in static mode and is
+// stripped in WS-backed modes (watch/serve), which drive their own
+// content refresh.
 const vimKeysScriptTemplate = `
 (() => {
     const STEP = 60;
@@ -35,6 +38,7 @@ const vimKeysScriptTemplate = `
             case 'g': window.scrollTo({ top: 0, behavior: 'smooth' }); break;
             case 'G': window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' }); break;
             case 'q': window.close(); break;
+            __RELOAD_CASE__
             default: return;
         }
         e.preventDefault();
@@ -43,8 +47,10 @@ const vimKeysScriptTemplate = `
 `
 
 // vimKeys returns the navigation script with j/k/l (default) or n/e/i
-// (colemak) substituted in.
-func vimKeys(colemak bool) string {
+// (colemak) substituted in. When staticReload is true, pressing `r`
+// triggers location.reload() so the user can pull in changes after
+// re-running `mdp <file>`; WS-backed modes leave it out.
+func vimKeys(colemak, staticReload bool) string {
 	down, up, right := "j", "k", "l"
 	if colemak {
 		down, up, right = "n", "e", "i"
@@ -52,6 +58,11 @@ func vimKeys(colemak bool) string {
 	s := strings.ReplaceAll(vimKeysScriptTemplate, "__DOWN__", down)
 	s = strings.ReplaceAll(s, "__UP__", up)
 	s = strings.ReplaceAll(s, "__RIGHT__", right)
+	reloadCase := ""
+	if staticReload {
+		reloadCase = "case 'r': location.reload(); break;"
+	}
+	s = strings.ReplaceAll(s, "__RELOAD_CASE__", reloadCase)
 	return s
 }
 
@@ -367,7 +378,7 @@ mdpRenderMath();
 %s
 </script>
 </body>
-</html>`, hljsThemeCSS, cssVars, CSSCommon, pandocCSS, chromeCSS, katexCSSOut, extraCSS, body, currentFileJS, hljsScript, katexJSOut, katexAutoRenderJSOut, mermaidJSOut, mermaidInit, vimKeys(colemak), wsScript)
+</html>`, hljsThemeCSS, cssVars, CSSCommon, pandocCSS, chromeCSS, katexCSSOut, extraCSS, body, currentFileJS, hljsScript, katexJSOut, katexAutoRenderJSOut, mermaidJSOut, mermaidInit, vimKeys(colemak, wsPort == 0), wsScript)
 }
 
 // hasMermaid reports whether the rendered body contains a mermaid

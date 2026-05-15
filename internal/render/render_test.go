@@ -519,6 +519,22 @@ func TestBuildPage_QuitKey(t *testing.T) {
 	}
 }
 
+func TestBuildPage_ReloadKey(t *testing.T) {
+	want := "case 'r': location.reload();"
+	t.Run("static", func(t *testing.T) {
+		page := BuildPage("<p>x</p>", "dark", 0, "", false, "")
+		if !strings.Contains(page, want) {
+			t.Errorf("static page missing r→reload binding")
+		}
+	})
+	t.Run("withWS", func(t *testing.T) {
+		page := BuildPage("<p>x</p>", "dark", 8765, "", false, "")
+		if strings.Contains(page, want) {
+			t.Errorf("WS-backed page should not bind r→reload (watch/serve drive their own refresh)")
+		}
+	})
+}
+
 func TestBuildPage_Colemak(t *testing.T) {
 	page := BuildPage("<p>x</p>", "dark", 0, "", true, "")
 	wants := []string{"case 'n':", "case 'e':", "case 'i':", "case 'h':"}

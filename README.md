@@ -79,7 +79,12 @@ closes with it (chrome `--app=` mode) or shows a "server stopped" notice.
 | Left / Right      | `h` / `l` | `h` / `i` |
 | Half-page down/up | `d` / `u` | `d` / `u` |
 | Top / Bottom      | `g` / `G` | `g` / `G` |
+| Reload (static)   | `r`       | `r`       |
 | Close             | `q`       | `q`       |
+
+`r` is only bound in the default static preview (`mdp <file>`); `watch`
+and the Neovim plugin drive their own content refresh. Pair it with a
+re-run of `mdp <file>` to pull the latest changes in.
 
 Enable Colemak with `colemak = true` in the [config](#config).
 
