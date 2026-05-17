@@ -26,11 +26,10 @@ func writeMD(t *testing.T, dir, name, content string) string {
 	return p
 }
 
-// newTestState creates a state with htmlCache primed via doRender so tests
-// that exercise the / route get a real rendered body.
 func newTestState(t *testing.T, file string) *state {
 	t.Helper()
 	s := newState(file, 0, "dark", false)
+	s.eventLog = io.Discard
 	s.doRender()
 	return s
 }

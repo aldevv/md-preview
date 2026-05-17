@@ -30,12 +30,12 @@ const (
 
 type state struct {
 	mu sync.Mutex
-	// file, fileDir, and fileDirResolved all change under mu. They move
-	// together: a stdin "render" pointing at a file in a sibling tree
-	// retargets all three so /_img/ confinement tracks the active doc.
-	// fileDirResolved is the EvalSymlinks of fileDir so served dirs
-	// that themselves traverse a symlink (macOS /var/folders ->
-	// /private/var/folders, NixOS, encfs) don't 403 their own images.
+	// file, fileDir, fileDirResolved move together under mu; a stdin
+	// "render" into a sibling tree retargets all three so /_img/
+	// confinement tracks the active doc. fileDirResolved is the
+	// EvalSymlinks of fileDir so served trees that themselves traverse
+	// a symlink (macOS /var/folders, NixOS, encfs) accept their own
+	// legitimate images.
 	file            string
 	fileDir         string
 	fileDirResolved string
@@ -90,11 +90,9 @@ func (s *state) doRender() int {
 	return v
 }
 
-// renderAndBroadcast re-renders and pushes a reload to every WS client.
-// The "file" field carries the current document path so the click
-// handler in the browser keeps relative-href resolution in sync after
-// a navigation. Used from both the HTTP /render handler and the
-// stdin "render" command.
+// The "file" field on the reload payload carries the current document
+// path so the browser click handler keeps relative-href resolution in
+// sync after a navigation.
 func (s *state) renderAndBroadcast() int {
 	v := s.doRender()
 	s.mu.Lock()
@@ -105,11 +103,9 @@ func (s *state) renderAndBroadcast() int {
 	return v
 }
 
-// broadcastScroll coalesces bursts of cursor-line events. nvim emits one
-// per CursorMoved, often at ~60 Hz; without this every move would marshal
-// a JSON frame and fan-out to every client. Window is scrollCoalesce; if
-// the timer is already running, the line replaces any earlier pending
-// value and the existing timer flushes the latest.
+// broadcastScroll coalesces scroll bursts into one frame per
+// scrollCoalesce window. nvim fires CursorMoved at ~60Hz; the older
+// pending line is dropped when a newer one arrives mid-window.
 func (s *state) broadcastScroll(line int) {
 	s.scrollMu.Lock()
 	s.scrollPending = line
@@ -146,11 +142,9 @@ func (s *state) removeClient(c net.Conn) {
 	s.mu.Unlock()
 }
 
-// broadcast fans writes out per-client so one stalled tab only blocks its
-// own goroutine for wsWriteTimeout; the rest still see the frame within
-// a few ms. Returns after every write attempt finishes so callers that
-// expect ordering across successive broadcasts (e.g. scroll then reload)
-// keep that ordering.
+// broadcast fans writes out per-client so a stalled tab only blocks its
+// own goroutine for wsWriteTimeout. Returns synchronously so callers
+// see ordering across successive frames (e.g. scroll then reload).
 func (s *state) broadcast(msg string) {
 	frame := wsEncode(msg)
 	s.mu.Lock()
@@ -197,12 +191,12 @@ var loopbackHosts = map[string]struct{}{
 	"localhost": {}, "127.0.0.1": {}, "::1": {}, "[::1]": {},
 }
 
-// originAllowed enforces a loopback Host (defends against DNS rebinding —
-// a malicious page that resolves evil.com to 127.0.0.1 can't get a browser
-// to send our private API requests with Host: evil.com) and a loopback
-// Origin when present (defends against cross-tab CSRF). Port is intentionally
-// not checked so tests on httptest's random port still pass; the loopback
-// bind in serve() guarantees only local processes can reach us at all.
+// originAllowed enforces a loopback Host (defends against DNS rebinding,
+// a page on evil.com that resolves to 127.0.0.1 cannot send requests with
+// Host: evil.com) and a loopback Origin when present (defends against
+// cross-tab CSRF). Port is intentionally not checked so httptest's
+// random port works; the loopback bind in serve() ensures only local
+// processes can reach us.
 func originAllowed(r *http.Request) bool {
 	host := r.Host
 	if h, _, err := net.SplitHostPort(host); err == nil {
@@ -223,8 +217,6 @@ func originAllowed(r *http.Request) bool {
 	return true
 }
 
-// guard wraps a handler with the loopback Origin/Host check and a method
-// check. Replaces five copies of the same boilerplate at handler entry.
 func guard(method string, fn http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !originAllowed(r) {
@@ -267,11 +259,9 @@ func (s *state) handleIndex(w http.ResponseWriter, r *http.Request) {
 	extraCSS := s.extraCSS
 	s.mu.Unlock()
 
-	// baseDir resolves relative <img src> against the currently-served
-	// document's directory; fileDir scopes the /_img/ URL to the
-	// originally-served root (or the current root for stdin cross-tree
-	// switches). They differ when /render switches to a file under a
-	// subdir of fileDir.
+	// filepath.Dir(file) resolves relative <img src> against the current
+	// document; fileDir scopes the /_img/ URL to the served root. They
+	// differ after /render switches to a file under a subdir of fileDir.
 	body = render.RewriteImgSrc(body, filepath.Dir(file), func(abs string) (string, bool) {
 		return imgURLFor(abs, fileDir)
 	})
@@ -284,12 +274,10 @@ func (s *state) handleIndex(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(encoded)
 }
 
-// imgURLFor maps an absolute image path to its /_img/ URL, or ok=false
-// when it falls outside the served directory so the rewriter leaves
-// the original src visible-broken in DevTools rather than silently
-// rewriting to a 403. The caller is responsible for snapshotting
-// fileDir under s.mu so a concurrent file switch can't make the
-// rewrite inconsistent.
+// imgURLFor returns ok=false for paths outside fileDir so the rewriter
+// leaves the original src visible-broken in DevTools rather than
+// silently masking it as a 403. Caller must snapshot fileDir under
+// s.mu so a concurrent file switch can't desync the rewrite.
 func imgURLFor(abs, fileDir string) (string, bool) {
 	if !pathInsideDir(abs, fileDir) {
 		return "", false
@@ -302,9 +290,8 @@ func imgURLFor(abs, fileDir string) (string, bool) {
 	return u.String(), true
 }
 
-// maxImgBytes caps the size of a single response from /_img/. A
-// markdown can point <img src> at any file in the served directory;
-// the cap stops a 50 GB sibling from being streamed in full.
+// maxImgBytes caps a single /_img/ response so a 50 GB sibling pointed at
+// by an <img src> can't be streamed in full.
 const maxImgBytes = 100 << 20
 
 func (s *state) handleImg(w http.ResponseWriter, r *http.Request) {
@@ -322,12 +309,10 @@ func (s *state) handleImg(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	// Re-check after symlink resolution: pathInsideDir is lexical, so
-	// a symlink inside fileDir pointing at /etc/passwd would otherwise
-	// be served verbatim by http.ServeFile. Compare against the
-	// resolved fileDir so served trees that themselves traverse a
-	// symlink (macOS /var/folders -> /private/var/folders) still
-	// accept their own legitimate images.
+	// Re-check after EvalSymlinks: pathInsideDir is lexical, so a symlink
+	// inside fileDir pointing at /etc/passwd would otherwise be served
+	// by http.ServeFile. Compare against the resolved root so legitimate
+	// images under symlinked served trees still pass.
 	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
 		http.NotFound(w, r)
@@ -357,8 +342,8 @@ func (s *state) handleReload(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"version": v})
 }
 
-// pathInsideDir returns true if cleanPath resolves to a path inside dir
-// (or equals dir). Both arguments must be absolute and clean.
+// pathInsideDir reports whether cleanPath is dir or under dir. Both
+// arguments must be absolute and lexically clean.
 func pathInsideDir(cleanPath, dir string) bool {
 	rel, err := filepath.Rel(dir, cleanPath)
 	if err != nil {
@@ -387,11 +372,9 @@ func (s *state) handleRender(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "path outside served directory: "+fp)
 			return
 		}
-		// Re-resolve symlinks before the Stat/Render. A symlink inside
-		// fileDir pointing at /etc/passwd (or any out-of-tree text file)
-		// passes the lexical check above; without this second check we'd
-		// hand it to RenderBody and broadcast the contents to every WS
-		// client. Mirrors handleImg's pattern.
+		// Re-check after EvalSymlinks: a symlink inside fileDir pointing at
+		// /etc/passwd passes the lexical check above; without this we'd
+		// render it and broadcast the contents to every WS client.
 		resolved, err := filepath.EvalSymlinks(cleaned)
 		if err != nil {
 			writeError(w, http.StatusNotFound, "file not found: "+fp)
@@ -422,10 +405,9 @@ func (s *state) handleRender(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "version": v})
 }
 
-// emitNavigate writes the navigate line consumed by the nvim plugin to
-// auto-`:edit` the new buffer when the preview switches files. Defaults
-// to os.Stdout when eventLog is unset so production keeps the existing
-// stdout contract; tests inject a buffer.
+// emitNavigate writes the "[md-preview] navigate: <path>" line the nvim
+// plugin parses to auto-`:edit` the new buffer. Defaults to os.Stdout
+// when eventLog is nil so production keeps the stdout contract.
 func (s *state) emitNavigate(path string) {
 	w := s.eventLog
 	if w == nil {
@@ -434,9 +416,8 @@ func (s *state) emitNavigate(path string) {
 	fmt.Fprintf(w, "[md-preview] navigate: %s\n", path)
 }
 
-// writeError serialises a {"error": msg} JSON body with the given
-// HTTP status, matching what the WS-client click handler parses for
-// the toast UI.
+// writeError emits the {"error": msg} shape the WS-client click handler
+// parses for the toast UI.
 func writeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -493,10 +474,9 @@ func (s *state) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// readJSONBody decodes the body into a string-keyed map. Empty/invalid
-// bodies yield an empty map so a malformed POST still flows through.
-// The bool return is false (and a 413 is written) when the cap is
-// exceeded; callers must not write further on false.
+// readJSONBody returns ok=false only when the body exceeded the size cap
+// (413 already written); callers must not write further on false.
+// Empty/invalid bodies yield an empty map with ok=true.
 func readJSONBody(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {
 	out := map[string]any{}
 	if r.Body == nil {
@@ -543,10 +523,9 @@ func writeJSON(w http.ResponseWriter, data any) {
 	_, _ = w.Write(encoded)
 }
 
-// readStdin consumes JSON commands from stdin one per line. The "render"
-// file path is trusted here (it comes from the local Neovim plugin over a
-// private pipe, not over HTTP) so the same path restriction as /render
-// does not apply.
+// readStdin trusts the "render" file path because it comes from the
+// local nvim plugin over a private pipe, not over HTTP; the /render
+// path-confinement restriction intentionally does NOT apply here.
 func readStdin(s *state, stdin io.Reader, quit func()) {
 	scanner := bufio.NewScanner(stdin)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -593,13 +572,10 @@ func readStdin(s *state, stdin io.Reader, quit func()) {
 	}
 }
 
-// Options configures Run. Watch enables the editor-agnostic file watcher
-// (mtime polling). OnListen, if non-nil, is invoked with the actual bound
-// port once net.Listen succeeds; useful when Port is 0 (ephemeral) and
-// the caller needs the address to open a browser. ExtraCSS is inlined
-// into every preview page (cli flag / user config). EventLog receives
-// the "[md-preview] navigate: <path>" line on file switches; nil falls
-// back to os.Stdout so the existing stdout contract is preserved.
+// Options configures Run. Watch enables the mtime-polling file watcher.
+// OnListen is invoked with the bound port once net.Listen returns,
+// required when Port is 0 (kernel-assigned). EventLog defaults to
+// os.Stdout when nil so the navigate-line stdout contract is preserved.
 type Options struct {
 	File     string
 	Port     int
@@ -611,13 +587,10 @@ type Options struct {
 	OnListen func(port int)
 }
 
-// serve runs the HTTP server and stdin reader concurrently. It returns
-// when the HTTP server stops or stdin closes/quits.
-//
-// When stdin is os.Stdin (production) the scanner goroutine cannot be
-// cancelled — it exits when the process exits. ctx-cancellation paths
-// therefore leak this one goroutine; production calls os.Exit before
-// that matters, and tests pass bounded readers that EOF naturally.
+// serve leaks the stdin scanner goroutine on ctx-cancel when stdin is
+// os.Stdin: bufio.Scanner can't be cancelled, and the scanner unblocks
+// only when the process exits. Production exits via os.Exit before this
+// matters; tests pass bounded readers that EOF naturally.
 func serve(ctx context.Context, s *state, stdin io.Reader, quit func(), watch bool, onListen func(int)) error {
 	s.doRender()
 
@@ -627,8 +600,8 @@ func serve(ctx context.Context, s *state, stdin io.Reader, quit func(), watch bo
 		return err
 	}
 
-	// Pick up the ephemeral port assigned by the kernel when Port==0 so
-	// the rendered page embeds the correct WS port.
+	// When Port==0 the kernel picks; surface it so the rendered page
+	// embeds the actual WS port.
 	actualPort := ln.Addr().(*net.TCPAddr).Port
 	s.mu.Lock()
 	s.port = actualPort
@@ -678,12 +651,9 @@ func serve(ctx context.Context, s *state, stdin io.Reader, quit func(), watch bo
 	}
 }
 
-// Run starts the server, reads JSON commands from stdin, and blocks until
-// stdin closes or the process is interrupted. On {"type":"quit"} the
-// process exits with status 0.
-//
-// The startup line "[md-preview] Serving on http://localhost:<port>/" is
-// written to stdout so external tooling parsing it keeps working.
+// Run blocks until stdin closes or {"type":"quit"} arrives (which calls
+// os.Exit(0)). The "[md-preview] Serving on http://localhost:<port>/"
+// startup line is parsed by external tooling and must stay on stdout.
 func Run(opts Options) error {
 	s := newState(opts.File, opts.Port, opts.Theme, opts.Colemak)
 	s.extraCSS = opts.ExtraCSS
