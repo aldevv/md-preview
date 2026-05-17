@@ -230,6 +230,38 @@ func TestRun_TexEntryUsesStaticWalker(t *testing.T) {
 	}
 }
 
+// Pandoc-missing .tex entry surfaces a clean stderr error and exits 1.
+// hideFromPath analog clears PATH + cache dir; the planted regular file
+// at <cache>/mdp blocks the download fallback's MkdirAll without needing
+// network access.
+func TestRun_TexEntry_PandocMissing_ReportsError(t *testing.T) {
+	cacheRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cacheRoot, "mdp"), []byte("block"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "/nonexistent")
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv("HOME", cacheRoot)
+	pandoc.ResetProbe()
+	t.Cleanup(pandoc.ResetProbe)
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "paper.tex")
+	if err := os.WriteFile(src, []byte(`\section{X}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errb bytes.Buffer
+	env := testEnv(t)
+	code := run([]string{"-p", src}, nil, &out, &errb, env)
+	if code != 1 {
+		t.Fatalf("exit = %d, want 1; stderr=%q", code, errb.String())
+	}
+	if !strings.Contains(strings.ToLower(errb.String()), "pandoc") {
+		t.Errorf("stderr = %q, want 'pandoc' mention", errb.String())
+	}
+}
+
 func TestRun_BadTheme(t *testing.T) {
 	var out, errb bytes.Buffer
 	env := testEnv(t)
