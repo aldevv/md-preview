@@ -706,6 +706,142 @@ func TestHandler_PostRender_RejectsBodyTooLarge(t *testing.T) {
 	}
 }
 
+// Symlink inside the served dir that resolves to an out-of-tree file
+// must be rejected by /render. The lexical pathInsideDir passes (the
+// link sits inside fileDir) so the second check on the resolved path
+// is what stops the contents from being broadcast over WS.
+func TestHandler_PostRender_RejectsSymlinkEscape(t *testing.T) {
+	outer := t.TempDir()
+	inner := filepath.Join(outer, "served")
+	if err := os.Mkdir(inner, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	file := writeMD(t, inner, "doc.md", "# Hello\n")
+	target := filepath.Join(outer, "secret.md")
+	if err := os.WriteFile(target, []byte("# Secret\nnope-classified\n"), 0o644); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+	link := filepath.Join(inner, "evil.md")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	s := newTestState(t, file)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	body, _ := json.Marshal(map[string]string{"file": link})
+	resp, err := http.Post(srv.URL+"/render", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /render: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 for symlink escape", resp.StatusCode)
+	}
+
+	getResp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer getResp.Body.Close()
+	page, _ := io.ReadAll(getResp.Body)
+	if bytes.Contains(page, []byte("nope-classified")) {
+		t.Errorf("rendered page leaked out-of-tree symlink target")
+	}
+}
+
+func TestHandler_PostRender_EmitsNavigateLineOnFileSwitch(t *testing.T) {
+	dir := t.TempDir()
+	first := writeMD(t, dir, "first.md", "# First\n")
+	second := writeMD(t, dir, "second.md", "# Second\n")
+	s := newTestState(t, first)
+	var buf bytes.Buffer
+	s.eventLog = &buf
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	body, _ := json.Marshal(map[string]string{"file": second})
+	resp, err := http.Post(srv.URL+"/render", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /render switch: %v", err)
+	}
+	resp.Body.Close()
+
+	absSecond, _ := filepath.Abs(second)
+	resolvedSecond, _ := filepath.EvalSymlinks(absSecond)
+	wantLine := "[md-preview] navigate: " + resolvedSecond + "\n"
+	if got := buf.String(); got != wantLine {
+		t.Errorf("eventLog = %q, want %q", got, wantLine)
+	}
+
+	buf.Reset()
+	resp, err = http.Post(srv.URL+"/render", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /render re-render: %v", err)
+	}
+	resp.Body.Close()
+	if got := buf.String(); got != "" {
+		t.Errorf("re-render of same file emitted navigate: %q", got)
+	}
+}
+
+func TestReadStdin_RenderUpdatesFileDirAcrossTrees(t *testing.T) {
+	dirA := t.TempDir()
+	dirB := t.TempDir()
+	fileA := writeMD(t, dirA, "a.md", "# A\n")
+	fileB := writeMD(t, dirB, "b.md", "# B\n")
+	s := newTestState(t, fileA)
+	var buf bytes.Buffer
+	s.eventLog = &buf
+
+	cmd := fmt.Sprintf(`{"type":"render","file":%q}`, fileB) + "\n"
+	readStdin(s, strings.NewReader(cmd), func() {})
+
+	wantFile, _ := filepath.Abs(fileB)
+	wantDir := filepath.Dir(wantFile)
+	wantResolved, _ := filepath.EvalSymlinks(wantDir)
+
+	s.mu.Lock()
+	gotFile := s.file
+	gotDir := s.fileDir
+	gotResolved := s.fileDirResolved
+	s.mu.Unlock()
+
+	if gotFile != wantFile {
+		t.Errorf("file = %q, want %q", gotFile, wantFile)
+	}
+	if gotDir != wantDir {
+		t.Errorf("fileDir = %q, want %q", gotDir, wantDir)
+	}
+	if gotResolved != wantResolved {
+		t.Errorf("fileDirResolved = %q, want %q", gotResolved, wantResolved)
+	}
+	wantLine := "[md-preview] navigate: " + wantFile + "\n"
+	if got := buf.String(); got != wantLine {
+		t.Errorf("navigate line = %q, want %q", got, wantLine)
+	}
+}
+
+func TestHandler_GetIndex_IncludesExtraCSS(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	s := newTestState(t, file)
+	marker := "/*mdp-extra-css-marker*/"
+	s.extraCSS = marker
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !bytes.Contains(body, []byte(marker)) {
+		t.Errorf("page missing extraCSS marker %q", marker)
+	}
+}
+
 func TestStdin_QuitCommand(t *testing.T) {
 	dir := t.TempDir()
 	file := writeMD(t, dir, "doc.md", "# Hello\n")

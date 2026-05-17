@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/aldevv/md-preview/internal/render"
-	"github.com/aldevv/md-preview/internal/render/pandoc"
 )
 
 const (
@@ -30,12 +29,12 @@ const (
 
 type state struct {
 	mu sync.Mutex
-	// file and fileDir change at runtime under mu. fileDirResolved is
-	// the EvalSymlinks of fileDir captured at construction time and
-	// is immutable; handleImg compares EvalSymlinks(image) against
-	// it so served dirs sitting under a symlinked tree (macOS
-	// /var/folders → /private/var/folders, NixOS, encfs) don't 403
-	// every legitimate image.
+	// file, fileDir, and fileDirResolved all change under mu. They move
+	// together: a stdin "render" pointing at a file in a sibling tree
+	// retargets all three so /_img/ confinement tracks the active doc.
+	// fileDirResolved is the EvalSymlinks of fileDir so served dirs
+	// that themselves traverse a symlink (macOS /var/folders ->
+	// /private/var/folders, NixOS, encfs) don't 403 their own images.
 	file            string
 	fileDir         string
 	fileDirResolved string
@@ -44,6 +43,8 @@ type state struct {
 	theme           string
 	port            int
 	colemak         bool
+	extraCSS        string
+	eventLog        io.Writer
 	wsClients       map[net.Conn]struct{}
 }
 
@@ -214,11 +215,20 @@ func (s *state) handleIndex(w http.ResponseWriter, r *http.Request) {
 	port := s.port
 	colemak := s.colemak
 	file := s.file
+	fileDir := s.fileDir
+	extraCSS := s.extraCSS
 	s.mu.Unlock()
 
-	body = render.RewriteImgSrc(body, filepath.Dir(file), s.imgURL)
+	// baseDir resolves relative <img src> against the currently-served
+	// document's directory; fileDir scopes the /_img/ URL to the
+	// originally-served root (or the current root for stdin cross-tree
+	// switches). They differ when /render switches to a file under a
+	// subdir of fileDir.
+	body = render.RewriteImgSrc(body, filepath.Dir(file), func(abs string) (string, bool) {
+		return imgURLFor(abs, fileDir)
+	})
 
-	page := render.BuildPage(body, theme, port, "", colemak, file)
+	page := render.BuildPage(body, theme, port, extraCSS, colemak, file)
 	encoded := []byte(page)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(len(encoded)))
@@ -226,16 +236,17 @@ func (s *state) handleIndex(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(encoded)
 }
 
-// imgURL maps an absolute image path to its /_img/ URL, or ok=false
+// imgURLFor maps an absolute image path to its /_img/ URL, or ok=false
 // when it falls outside the served directory so the rewriter leaves
 // the original src visible-broken in DevTools rather than silently
-// rewriting to a 403. fileDir is immutable post-construction so this
-// reads it without taking s.mu.
-func (s *state) imgURL(abs string) (string, bool) {
-	if !pathInsideDir(abs, s.fileDir) {
+// rewriting to a 403. The caller is responsible for snapshotting
+// fileDir under s.mu so a concurrent file switch can't make the
+// rewrite inconsistent.
+func imgURLFor(abs, fileDir string) (string, bool) {
+	if !pathInsideDir(abs, fileDir) {
 		return "", false
 	}
-	rel, err := filepath.Rel(s.fileDir, abs)
+	rel, err := filepath.Rel(fileDir, abs)
 	if err != nil {
 		return "", false
 	}
@@ -254,8 +265,12 @@ func (s *state) handleImg(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	abs := filepath.Clean(filepath.Join(s.fileDir, filepath.FromSlash(rel)))
-	if !pathInsideDir(abs, s.fileDir) {
+	s.mu.Lock()
+	fileDir := s.fileDir
+	fileDirResolved := s.fileDirResolved
+	s.mu.Unlock()
+	abs := filepath.Clean(filepath.Join(fileDir, filepath.FromSlash(rel)))
+	if !pathInsideDir(abs, fileDir) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -263,14 +278,14 @@ func (s *state) handleImg(w http.ResponseWriter, r *http.Request) {
 	// a symlink inside fileDir pointing at /etc/passwd would otherwise
 	// be served verbatim by http.ServeFile. Compare against the
 	// resolved fileDir so served trees that themselves traverse a
-	// symlink (macOS /var/folders → /private/var/folders) still
+	// symlink (macOS /var/folders -> /private/var/folders) still
 	// accept their own legitimate images.
 	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	if !pathInsideDir(resolved, s.fileDirResolved) {
+	if !pathInsideDir(resolved, fileDirResolved) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -317,40 +332,58 @@ func (s *state) handleRender(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Lock()
 		dir := s.fileDir
+		dirResolved := s.fileDirResolved
 		s.mu.Unlock()
 		cleaned := filepath.Clean(abs)
 		if !pathInsideDir(cleaned, dir) {
 			writeError(w, http.StatusForbidden, "path outside served directory: "+fp)
 			return
 		}
-		info, statErr := os.Stat(cleaned)
+		// Re-resolve symlinks before the Stat/Render. A symlink inside
+		// fileDir pointing at /etc/passwd (or any out-of-tree text file)
+		// passes the lexical check above; without this second check we'd
+		// hand it to RenderBody and broadcast the contents to every WS
+		// client. Mirrors handleImg's pattern.
+		resolved, err := filepath.EvalSymlinks(cleaned)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "file not found: "+fp)
+			return
+		}
+		if !pathInsideDir(resolved, dirResolved) {
+			writeError(w, http.StatusForbidden, "path outside served directory: "+fp)
+			return
+		}
+		info, statErr := os.Stat(resolved)
 		if statErr != nil || info.IsDir() {
 			writeError(w, http.StatusNotFound, "file not found: "+fp)
 			return
 		}
-		if !isRenderable(cleaned) {
-			writeError(w, http.StatusUnsupportedMediaType, "unsupported format: "+filepath.Ext(cleaned))
+		if !render.IsWalkableExt(resolved) {
+			writeError(w, http.StatusUnsupportedMediaType, "unsupported format: "+filepath.Ext(resolved))
 			return
 		}
 		s.mu.Lock()
-		s.file = cleaned
+		switched := s.file != resolved
+		s.file = resolved
 		s.mu.Unlock()
+		if switched {
+			s.emitNavigate(resolved)
+		}
 	}
 	v := s.renderAndBroadcast()
 	writeJSON(w, map[string]any{"ok": true, "version": v})
 }
 
-// isRenderable reports whether mdp can render path: markdown goes
-// through goldmark, every other extension recognised by
-// pandoc.InputFormat goes through pandoc. Used by /render to refuse
-// links pointing at non-renderable files (binaries, unknown
-// extensions) with a clean 415 rather than rendering garbage.
-func isRenderable(path string) bool {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".md", ".markdown":
-		return true
+// emitNavigate writes the navigate line consumed by the nvim plugin to
+// auto-`:edit` the new buffer when the preview switches files. Defaults
+// to os.Stdout when eventLog is unset so production keeps the existing
+// stdout contract; tests inject a buffer.
+func (s *state) emitNavigate(path string) {
+	w := s.eventLog
+	if w == nil {
+		w = os.Stdout
 	}
-	return pandoc.InputFormat(path) != ""
+	fmt.Fprintf(w, "[md-preview] navigate: %s\n", path)
 }
 
 // writeError serialises a {"error": msg} JSON body with the given
@@ -484,12 +517,26 @@ func readStdin(s *state, stdin io.Reader, quit func()) {
 			quit()
 			return
 		case "render":
+			var navigateTo string
 			if fp, _ := msg["file"].(string); fp != "" {
 				if abs, err := filepath.Abs(fp); err == nil {
+					dir := filepath.Dir(abs)
+					resolved, errR := filepath.EvalSymlinks(dir)
+					if errR != nil {
+						resolved = dir
+					}
 					s.mu.Lock()
+					if s.file != abs {
+						navigateTo = abs
+					}
 					s.file = abs
+					s.fileDir = dir
+					s.fileDirResolved = resolved
 					s.mu.Unlock()
 				}
+			}
+			if navigateTo != "" {
+				s.emitNavigate(navigateTo)
 			}
 			s.renderAndBroadcast()
 		case "scroll":
@@ -500,14 +547,19 @@ func readStdin(s *state, stdin io.Reader, quit func()) {
 
 // Options configures Run. Watch enables the editor-agnostic file watcher
 // (mtime polling). OnListen, if non-nil, is invoked with the actual bound
-// port once net.Listen succeeds — useful when Port is 0 (ephemeral) and
-// the caller needs the address to open a browser.
+// port once net.Listen succeeds; useful when Port is 0 (ephemeral) and
+// the caller needs the address to open a browser. ExtraCSS is inlined
+// into every preview page (cli flag / user config). EventLog receives
+// the "[md-preview] navigate: <path>" line on file switches; nil falls
+// back to os.Stdout so the existing stdout contract is preserved.
 type Options struct {
 	File     string
 	Port     int
 	Theme    string
 	Colemak  bool
 	Watch    bool
+	ExtraCSS string
+	EventLog io.Writer
 	OnListen func(port int)
 }
 
@@ -586,5 +638,7 @@ func serve(ctx context.Context, s *state, stdin io.Reader, quit func(), watch bo
 // written to stdout so external tooling parsing it keeps working.
 func Run(opts Options) error {
 	s := newState(opts.File, opts.Port, opts.Theme, opts.Colemak)
+	s.extraCSS = opts.ExtraCSS
+	s.eventLog = opts.EventLog
 	return serve(context.Background(), s, os.Stdin, func() { os.Exit(0) }, opts.Watch, opts.OnListen)
 }
