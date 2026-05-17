@@ -881,6 +881,7 @@ func TestStdin_QuitCommand(t *testing.T) {
 type fakeConn struct {
 	writeStarted chan struct{}
 	writeDone    chan struct{}
+	writes       [][]byte
 	deadline     time.Time
 	slow         bool
 	closed       bool
@@ -903,7 +904,15 @@ func (f *fakeConn) Write(b []byte) (int, error) {
 	default:
 	}
 	if !f.slow {
-		f.writeDone <- struct{}{}
+		dup := make([]byte, len(b))
+		copy(dup, b)
+		f.mu.Lock()
+		f.writes = append(f.writes, dup)
+		f.mu.Unlock()
+		select {
+		case f.writeDone <- struct{}{}:
+		default:
+		}
 		return len(b), nil
 	}
 	f.mu.Lock()
@@ -918,6 +927,14 @@ func (f *fakeConn) Write(b []byte) (int, error) {
 		return 0, errors.New("write deadline exceeded")
 	}
 	select {}
+}
+
+func (f *fakeConn) writeFrames() [][]byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([][]byte, len(f.writes))
+	copy(out, f.writes)
+	return out
 }
 
 func (f *fakeConn) Close() error {
@@ -985,5 +1002,32 @@ func TestBroadcast_FanOut_SlowClientDoesNotStallOthers(t *testing.T) {
 	}
 	if !slow.isClosed() {
 		t.Errorf("slow client conn was not closed on eviction")
+	}
+}
+
+func TestBroadcastScroll_Coalesces(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	s := newTestState(t, file)
+	s.eventLog = io.Discard
+
+	client := newFastConn()
+	s.addClient(client)
+
+	for i := 1; i <= 10; i++ {
+		s.broadcastScroll(i)
+	}
+	time.Sleep(scrollCoalesce * 4)
+
+	frames := client.writeFrames()
+	if len(frames) > 2 {
+		t.Fatalf("got %d frames, want <= 2 (coalesce window dropped older lines)", len(frames))
+	}
+	if len(frames) == 0 {
+		t.Fatalf("got 0 frames, want at least 1 (flush should fire once after window)")
+	}
+	last := string(frames[len(frames)-1])
+	if !strings.Contains(last, `"line":10`) {
+		t.Errorf("last frame = %q, want one carrying the newest line value (10)", last)
 	}
 }

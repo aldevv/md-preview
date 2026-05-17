@@ -25,6 +25,7 @@ import (
 const (
 	maxJSONBodyBytes = 64 << 10
 	wsWriteTimeout   = 2 * time.Second
+	scrollCoalesce   = 30 * time.Millisecond
 )
 
 type state struct {
@@ -46,6 +47,11 @@ type state struct {
 	extraCSS        string
 	eventLog        io.Writer
 	wsClients       map[net.Conn]struct{}
+
+	scrollMu      sync.Mutex
+	scrollPending int
+	scrollHas     bool
+	scrollTimer   *time.Timer
 }
 
 func newState(file string, port int, theme string, colemak bool) *state {
@@ -99,7 +105,31 @@ func (s *state) renderAndBroadcast() int {
 	return v
 }
 
+// broadcastScroll coalesces bursts of cursor-line events. nvim emits one
+// per CursorMoved, often at ~60 Hz; without this every move would marshal
+// a JSON frame and fan-out to every client. Window is scrollCoalesce; if
+// the timer is already running, the line replaces any earlier pending
+// value and the existing timer flushes the latest.
 func (s *state) broadcastScroll(line int) {
+	s.scrollMu.Lock()
+	s.scrollPending = line
+	s.scrollHas = true
+	if s.scrollTimer == nil {
+		s.scrollTimer = time.AfterFunc(scrollCoalesce, s.flushScroll)
+	}
+	s.scrollMu.Unlock()
+}
+
+func (s *state) flushScroll() {
+	s.scrollMu.Lock()
+	line := s.scrollPending
+	has := s.scrollHas
+	s.scrollHas = false
+	s.scrollTimer = nil
+	s.scrollMu.Unlock()
+	if !has {
+		return
+	}
 	payload, _ := json.Marshal(map[string]any{"type": "scroll", "line": line})
 	s.broadcast(string(payload))
 }
