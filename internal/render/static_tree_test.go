@@ -256,6 +256,50 @@ func TestRenderStaticTree_MaxFilesCap(t *testing.T) {
 	}
 }
 
+func TestRenderStaticTree_PandocBudget_StopsWalking(t *testing.T) {
+	if !pandoc.Available() {
+		t.Skip("pandoc not on PATH")
+	}
+	root := t.TempDir()
+	tmp := t.TempDir()
+	const siblings = 30
+	const budget = 25
+	var b strings.Builder
+	b.WriteString("# entry\n")
+	for i := 0; i < siblings; i++ {
+		name := fmt.Sprintf("c%02d.tex", i)
+		fmt.Fprintf(&b, "[c%d](%s)\n", i, name)
+		if err := os.WriteFile(filepath.Join(root, name), []byte(`\section{X}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entry := writeMD(t, root, "index.md", b.String())
+
+	entryHTML, err := RenderStaticTree(entry, tmp, StaticTreeOptions{Theme: "dark", PandocBudget: budget})
+	if err != nil {
+		t.Fatalf("RenderStaticTree: %v", err)
+	}
+	rendered := 0
+	for i := 0; i < siblings; i++ {
+		src := filepath.Join(root, fmt.Sprintf("c%02d.tex", i))
+		if _, err := os.Stat(TmpHTMLPath(tmp, src)); err == nil {
+			rendered++
+			if i >= budget {
+				t.Errorf("c%02d.tex rendered but should be over budget", i)
+			}
+		} else if i < budget {
+			t.Errorf("c%02d.tex should have been rendered: %v", i, err)
+		}
+	}
+	if rendered != budget {
+		t.Errorf("rendered count = %d, want %d", rendered, budget)
+	}
+	body, _ := os.ReadFile(entryHTML)
+	if !strings.Contains(string(body), url.QueryEscape("max files reached")) {
+		t.Errorf("over-budget href should toast 'max files reached'; body=%s", body)
+	}
+}
+
 // Race-detector smoke test: 12 pandoc renders fan out through
 // renderBatch in one wave; must come back with all bodies populated.
 func TestRenderStaticTree_ParallelBatch_NoRace(t *testing.T) {

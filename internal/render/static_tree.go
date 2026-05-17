@@ -24,6 +24,13 @@ import (
 // a clean message instead of a broken navigation.
 const StaticTreeMaxFiles = 200
 
+// StaticTreePandocBudget caps how many pandoc-renderable files the
+// BFS walks. Pandoc renders are ~100-1000x more expensive than
+// goldmark, so the total-files cap (StaticTreeMaxFiles) alone lets a
+// .tex-heavy tree blow the wall-clock budget. Counted independently
+// of StaticTreeMaxFiles: a tree can fill both caps simultaneously.
+const StaticTreePandocBudget = 25
+
 // StaticTreeOptions configures RenderStaticTree. Mirrors the subset
 // of BuildPage args the entry and its siblings need.
 type StaticTreeOptions struct {
@@ -33,6 +40,8 @@ type StaticTreeOptions struct {
 	// MaxFiles overrides StaticTreeMaxFiles when nonzero. Tests use
 	// this to exercise the cap path without authoring 200 fixtures.
 	MaxFiles int
+	// PandocBudget overrides StaticTreePandocBudget when nonzero.
+	PandocBudget int
 }
 
 // TmpHTMLPath returns the stable per-source tmp HTML file used by
@@ -81,6 +90,10 @@ func RenderStaticTree(entry, tmpDir string, opts StaticTreeOptions) (string, err
 	if maxFiles <= 0 {
 		maxFiles = StaticTreeMaxFiles
 	}
+	pandocBudget := opts.PandocBudget
+	if pandocBudget <= 0 {
+		pandocBudget = StaticTreePandocBudget
+	}
 
 	// Wave-parallel BFS through walkable links inside rootDir.
 	// bodies[resolved] holds the rendered output keyed on the
@@ -92,6 +105,10 @@ func RenderStaticTree(entry, tmpDir string, opts StaticTreeOptions) (string, err
 	bodies := map[string]string{}
 	seen := map[string]bool{resolvedEntry: true}
 	queue := []string{resolvedEntry}
+	pandocCount := 0
+	if pandoc.InputFormat(resolvedEntry) != "" {
+		pandocCount++
+	}
 	for len(queue) > 0 && len(bodies) < maxFiles {
 		batch := queue
 		queue = nil
@@ -110,6 +127,12 @@ func RenderStaticTree(entry, tmpDir string, opts StaticTreeOptions) (string, err
 					continue
 				}
 				seen[resolved] = true
+				if pandoc.InputFormat(resolved) != "" {
+					if pandocCount >= pandocBudget {
+						continue
+					}
+					pandocCount++
+				}
 				queue = append(queue, resolved)
 			}
 		}
