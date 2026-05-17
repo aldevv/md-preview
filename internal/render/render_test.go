@@ -535,6 +535,21 @@ func TestBuildPage_ReloadKey(t *testing.T) {
 	})
 }
 
+func TestBuildPage_HasExternalLinkHandler(t *testing.T) {
+	page := BuildPage("<p>x</p>", "dark", 0, "", false, "")
+	wants := []string{
+		"/^(https?|mailto|tel|ftp|ftps):/i",
+		"window.open(href, '_blank', 'noopener,noreferrer')",
+		"e.preventDefault()",
+		"if (e.defaultPrevented) return;",
+	}
+	for _, want := range wants {
+		if !strings.Contains(page, want) {
+			t.Errorf("page missing external-link handler fragment %q", want)
+		}
+	}
+}
+
 func TestBuildPage_Colemak(t *testing.T) {
 	page := BuildPage("<p>x</p>", "dark", 0, "", true, "")
 	wants := []string{"case 'n':", "case 'e':", "case 'i':", "case 'h':"}

@@ -183,6 +183,54 @@ func TestRenderStaticTree_NonRenderablePassesThroughAsFileURL(t *testing.T) {
 	}
 }
 
+func TestRenderStaticTree_PandocEntryToPandocLink(t *testing.T) {
+	if !pandoc.Available() {
+		t.Skip("pandoc not on PATH")
+	}
+	root := t.TempDir()
+	tmp := t.TempDir()
+	entry := filepath.Join(root, "paper.tex")
+	chap := filepath.Join(root, "chap.tex")
+	if err := os.WriteFile(entry, []byte(`\section{A}\href{chap.tex}{see chap}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(chap, []byte(`\section{B}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	entryHTML, err := RenderStaticTree(entry, tmp, StaticTreeOptions{Theme: "dark"})
+	if err != nil {
+		t.Fatalf("RenderStaticTree: %v", err)
+	}
+	body, _ := os.ReadFile(entryHTML)
+	wantHref := "file://" + TmpHTMLPath(tmp, chap)
+	if !strings.Contains(string(body), wantHref) {
+		t.Errorf("entry HTML missing tex-to-tex link rewrite to %s, body=%s", wantHref, body)
+	}
+	if _, err := os.Stat(TmpHTMLPath(tmp, chap)); err != nil {
+		t.Errorf("chap.tex should have been pre-rendered: %v", err)
+	}
+}
+
+func TestRenderStaticTree_OutOfTreeTexBecomesToast(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	tmp := t.TempDir()
+	a := writeMD(t, root, "a.md", "# A\n[escape](../"+filepath.Base(outside)+"/paper.tex)\n")
+	if err := os.WriteFile(filepath.Join(outside, "paper.tex"), []byte(`\section{X}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	entry, err := RenderStaticTree(a, tmp, StaticTreeOptions{Theme: "dark"})
+	if err != nil {
+		t.Fatalf("RenderStaticTree: %v", err)
+	}
+	body, _ := os.ReadFile(entry)
+	if !strings.Contains(string(body), url.QueryEscape("out of tree")) {
+		t.Errorf("out-of-tree tex link should toast 'out of tree'; body=%s", body)
+	}
+}
+
 func TestRenderStaticTree_MaxFilesCap(t *testing.T) {
 	root := t.TempDir()
 	tmp := t.TempDir()

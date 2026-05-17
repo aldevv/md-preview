@@ -98,27 +98,24 @@ allowlist to drift out of sync.
   chrome `--app=` window. A future `tests/smoke.js` Playwright run
   could exercise it if the existing e2e harness comes back.
 
-## Phase 2: static mode (deferred)
+## Phase 2: static mode
 
 `mdp foo.md` writes a single HTML file and points the browser at
-`file://` it. There is no server to ask. Two viable approaches when
-we get here:
+`file://` it. There is no server to ask. The walker (`RenderStaticTree`
+in `internal/render/static_tree.go`) BFS-walks through
+`filepath.Dir(entry)` following every link whose target extension is
+walkable: `.md`/`.markdown` via goldmark, anything else via pandoc.
+Each rendered file gets its own `mdp-<sha>.html` tmp file; hrefs are
+rewritten to `file://` URLs so a plain browser click navigates between
+files with no server. Pandoc renders inside the wave run in parallel
+across `runtime.NumCPU()` workers so a tex paper that links to 10
+chapters doesn't serialize 10 pandoc subprocesses.
 
-a. **Pre-render the link graph.** BFS through `filepath.Dir(entry)`
-   following any link whose target extension is renderable. Write
-   each to `/tmp/mdp-<sha>.html`; rewrite hrefs in the source HTML
-   to point at the new files. Cap at e.g. 200 files; over-cap leaves
-   the remaining links untouched.
-
-b. **Static-mode error sentinel.** Replace local-path hrefs with
-   `javascript:mdpShowToast("not available in static mode; run mdp
-   watch to navigate")` so clicks at least produce a clean message
-   rather than a raw-source view.
-
-Suggested mix: pre-render `.md` (cheap, ~13 ms each in goldmark)
-and use the sentinel for non-md formats (pandoc subprocess per
-linked `.docx` adds up quickly). Revisit if usage warrants the
-extra wiring.
+The walker caps at `StaticTreeMaxFiles = 200`. Over-cap links and
+non-walkable in-tree files rewrite to a `javascript:mdpStaticToast(...)`
+sentinel that pops a toast on click rather than producing a broken
+navigation. Out-of-tree, missing-file, and symlink-escape cases also
+toast.
 
 ## Confinement and security
 

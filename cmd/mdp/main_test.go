@@ -16,6 +16,8 @@ import (
 	"testing"
 
 	"github.com/aldevv/md-preview/internal/config"
+	"github.com/aldevv/md-preview/internal/render"
+	"github.com/aldevv/md-preview/internal/render/pandoc"
 	"github.com/aldevv/md-preview/internal/server"
 )
 
@@ -186,6 +188,44 @@ func TestRun_ThemeFlag_Default(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "#0d1117") {
 		t.Fatalf("dark theme color not found in page")
+	}
+}
+
+func TestRun_TexEntryUsesStaticWalker(t *testing.T) {
+	if !pandoc.Available() {
+		t.Skip("pandoc not on PATH")
+	}
+	dir := t.TempDir()
+	entry := filepath.Join(dir, "paper.tex")
+	chap := filepath.Join(dir, "chap.tex")
+	if err := os.WriteFile(entry, []byte(`\section{A}\href{chap.tex}{see chap}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(chap, []byte(`\section{B}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errb bytes.Buffer
+	env := testEnv(t)
+	env.TempDir = func() string { return dir }
+	code := run([]string{"-p", entry}, nil, &out, &errb, env)
+	if code != 0 {
+		t.Fatalf("exit code = %d; stderr=%s", code, errb.String())
+	}
+	tmpPath := strings.TrimSpace(out.String())
+	if tmpPath == "" {
+		t.Fatal("stdout did not contain a path")
+	}
+	if _, err := os.Stat(render.TmpHTMLPath(dir, chap)); err != nil {
+		t.Errorf("chap.tex should have been pre-rendered by the static walker: %v", err)
+	}
+	page, err := os.ReadFile(tmpPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHref := "file://" + render.TmpHTMLPath(dir, chap)
+	if !strings.Contains(string(page), wantHref) {
+		t.Errorf("entry HTML missing tex-to-tex link rewrite to %s", wantHref)
 	}
 }
 

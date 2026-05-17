@@ -271,7 +271,7 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 	// cross-file clicks work in static mode. The BFS is capped at
 	// StaticTreeMaxFiles so a heavy linker can't run pandoc 1000 times.
 	var tmpPath string
-	if isStaticWalkable(src) {
+	if render.IsWalkableExt(src) {
 		opts := render.StaticTreeOptions{
 			Theme:    theme,
 			ExtraCSS: config.ExtraCSS(cfg, stderr),
@@ -337,17 +337,6 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 		return 1
 	}
 	return 0
-}
-
-// isStaticWalkable reports whether src's extension is one the static
-// link-graph walker can pre-render: markdown via goldmark, anything
-// else via pandoc.
-func isStaticWalkable(src string) bool {
-	switch strings.ToLower(filepath.Ext(src)) {
-	case ".md", ".markdown":
-		return true
-	}
-	return pandoc.InputFormat(src) != ""
 }
 
 // tmpHTMLPath returns a stable path so re-runs on the same source

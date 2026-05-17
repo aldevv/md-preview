@@ -83,9 +83,11 @@ func RenderStaticTree(entry, tmpDir string, opts StaticTreeOptions) (string, err
 
 	// Wave-parallel BFS through walkable links inside rootDir.
 	// bodies[resolved] holds the rendered output keyed on the
-	// symlink-resolved path. Each wave renders its batch in parallel
-	// (pandoc subprocesses are the bottleneck); hrefs discovered
-	// across the wave feed the next.
+	// symlink-resolved path so two hrefs aimed at the same physical
+	// file dedup correctly and a link target outside rootDir (via
+	// symlink) can't slip past confinement. Each wave renders its
+	// batch in parallel (pandoc subprocesses are the bottleneck);
+	// hrefs discovered across the wave feed the next.
 	bodies := map[string]string{}
 	seen := map[string]bool{resolvedEntry: true}
 	queue := []string{resolvedEntry}
@@ -198,7 +200,7 @@ func resolveWalkTarget(href, srcDir, rootDir string) string {
 	if !pathInsideDir(tgt, rootDir) {
 		return ""
 	}
-	if !isWalkableExt(tgt) {
+	if !IsWalkableExt(tgt) {
 		return ""
 	}
 	resolved, err := filepath.EvalSymlinks(tgt)
@@ -290,7 +292,7 @@ func rewriteOneStaticHref(href, srcDir, rootDir string, rendered map[string]stri
 	if !pathInsideDir(resolved, rootDir) {
 		return staticToastHref("out of tree: " + href)
 	}
-	if isWalkableExt(resolved) {
+	if IsWalkableExt(resolved) {
 		if tmp, ok := rendered[resolved]; ok {
 			return "file://" + tmp
 		}
@@ -299,10 +301,10 @@ func rewriteOneStaticHref(href, srcDir, rootDir string, rendered map[string]stri
 	return "file://" + resolved
 }
 
-// isWalkableExt reports whether path's extension is one the static
+// IsWalkableExt reports whether path's extension is one the static
 // walker pre-renders: markdown via goldmark, anything else via
 // pandoc. Other in-tree files fall through to a raw file:// link.
-func isWalkableExt(path string) bool {
+func IsWalkableExt(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".md", ".markdown":
 		return true

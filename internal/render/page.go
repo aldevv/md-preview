@@ -356,6 +356,7 @@ function mdpStaticToast(encoded) {
 }
 window.mdpStaticToast = mdpStaticToast;
 document.addEventListener('click', (e) => {
+  if (e.defaultPrevented) return;
   const a = e.target.closest('a');
   if (!a) return;
   const href = a.getAttribute('href');
