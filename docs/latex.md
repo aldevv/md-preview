@@ -99,11 +99,11 @@ Block-level for `.tex` files and fenced blocks: the WS scroll handler in `page.g
 ## Tests
 
 - `internal/render/render_test.go`:
-  - `TestRenderFencedLatex_PandocRenders` — fenced `` ```latex `` produces `.latex-block` with pandoc-rendered HTML.
-  - `TestRenderFencedLatex_PandocMissingShowsError` — fenced block with pandoc missing emits `.latex-error` containing the install hint.
-  - `TestRenderBody_TexExtensionRequiresPandoc` — `.tex` without pandoc returns `ErrPandocNotFound`.
-  - `TestRenderFencedLatex_DataLinePreserved` — fenced block carries the source line for scroll-sync.
+  - `TestRenderFencedLatex_PandocRenders`: fenced `` ```latex `` produces `.latex-block` with pandoc-rendered HTML.
+  - `TestRenderFencedLatex_PandocMissingShowsError`: fenced block with pandoc missing emits `.latex-error` containing the install hint.
+  - `TestRenderBody_TexExtensionRequiresPandoc`: `.tex` without pandoc returns `ErrPandocNotFound`.
+  - `TestRenderFencedLatex_DataLinePreserved`: fenced block carries the source line for scroll-sync.
 
 - Fixtures:
-  - `testdata/sample.tex` — sections, lists, math, a tabular.
-  - `testdata/embedded_latex.md` — one fenced LaTeX block in prose.
+  - `testdata/sample.tex`: sections, lists, math, a tabular.
+  - `testdata/embedded_latex.md`: one fenced LaTeX block in prose.

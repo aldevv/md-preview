@@ -126,12 +126,12 @@ A, C, D-linux, and H-linux all require `libwebkit2gtk-4.1` on the user's machine
 
 Option H, behind `MDP_NATIVE=1` env-var gate in `mdp watch`. Files:
 
-- `internal/nativewin/nativewin.go` — public API (`Open(opts) error`, `Available() bool`, `ErrUnsupported`).
-- `internal/nativewin/nativewin_linux.go` — purego + `libwebkit2gtk-4.1` (with `-4.0` fallback) + GTK 3.
-- `internal/nativewin/nativewin_darwin.go` — purego/objc + NSWindow + WKWebView with autorelease pool, retained window delegate, and `postEvent:atStart:` after `[NSApp stop:]` for runloop unblock.
-- `internal/nativewin/nativewin_other.go` — stub returning `ErrUnsupported` for non-linux/darwin.
-- `cmd/mdp/main.go` — `Environment.OpenWindow` seam, `runWatchWithNativeWindow` helper.
-- `cmd/mdp/main_darwin.go` — `runtime.LockOSThread()` in `init()` for the Cocoa main-thread requirement.
+- `internal/nativewin/nativewin.go`: public API (`Open(opts) error`, `Available() bool`, `ErrUnsupported`).
+- `internal/nativewin/nativewin_linux.go`: purego + `libwebkit2gtk-4.1` (with `-4.0` fallback) + GTK 3.
+- `internal/nativewin/nativewin_darwin.go`: purego/objc + NSWindow + WKWebView with autorelease pool, retained window delegate, and `postEvent:atStart:` after `[NSApp stop:]` for runloop unblock.
+- `internal/nativewin/nativewin_other.go`: stub returning `ErrUnsupported` for non-linux/darwin.
+- `cmd/mdp/main.go`: `Environment.OpenWindow` seam, `runWatchWithNativeWindow` helper.
+- `cmd/mdp/main_darwin.go`: `runtime.LockOSThread()` in `init()` for the Cocoa main-thread requirement.
 
 The browser-spawn path in `autoBrowserCmd` stays in place as the fallback for users without `libwebkit2gtk`, users who explicitly configure a browser, or users who don't set `MDP_NATIVE=1`.
 

@@ -6,17 +6,17 @@
 
 All loopback-only; foreign `Origin` / `Host` headers are rejected.
 
-- `GET /` — rendered HTML page
-- `GET /reload` — current render version (used by the plugin's readiness probe)
-- `GET /ws` — WebSocket upgrade for live reload + scroll sync
-- `POST /render` — re-render (optionally switching `file`, restricted to the originally-served directory)
-- `POST /scroll` — broadcast a scroll target line
+- `GET /`: rendered HTML page
+- `GET /reload`: current render version (used by the plugin's readiness probe)
+- `GET /ws`: WebSocket upgrade for live reload + scroll sync
+- `POST /render`: re-render (optionally switching `file`, restricted to the originally-served directory)
+- `POST /scroll`: broadcast a scroll target line
 
 ## Repo layout
 
 ```
-cmd/mdp/main.go    -- CLI entrypoint + `mdp serve` subcommand
-internal/render    -- markdown → HTML body + page template
-internal/server    -- HTTP + WebSocket server for the plugin
-internal/config    -- TOML config, browser detection, fzf picker
+cmd/mdp/main.go    CLI entrypoint + `mdp serve` subcommand
+internal/render    markdown to HTML body + page template
+internal/server    HTTP + WebSocket server for the plugin
+internal/config    TOML config, browser detection, fzf picker
 ```

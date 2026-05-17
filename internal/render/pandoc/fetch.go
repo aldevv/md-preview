@@ -34,7 +34,7 @@ var downloadPandocFn = downloadPandoc
 // Ensure returns the path to a pandoc binary that handles format
 // (a `pandoc --from` name like "latex" or "djot"). Probe order:
 //
-//  1. cache (~/.cache/mdp/pandoc-<Version>/pandoc) — always wins
+//  1. cache (~/.cache/mdp/pandoc-<Version>/pandoc), always wins
 //  2. $PATH pandoc that lists format in --list-input-formats
 //  3. download the pinned release if its embedded format list
 //     includes format

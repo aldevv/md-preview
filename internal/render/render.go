@@ -72,7 +72,7 @@ func (d *dataLineRenderer) SetOption(name renderer.OptionName, value any) {
 func (d *dataLineRenderer) RegisterFuncs(reg renderer.NodeRendererFuncRegisterer) {
 	reg.Register(ast.KindFencedCodeBlock, d.renderFencedCodeBlock)
 	reg.Register(ast.KindCodeBlock, d.renderCodeBlock)
-	// KindHTMLBlock deliberately not registered — goldmark's default with
+	// KindHTMLBlock deliberately not registered. goldmark's default with
 	// WithUnsafe off emits a "raw HTML omitted" comment, which is what we want.
 }
 
