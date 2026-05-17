@@ -475,11 +475,12 @@ func runWatchSubcommand(args []string, stdout, stderr io.Writer, env Environment
 	}
 
 	opts := server.Options{
-		File:    src,
-		Port:    0, // kernel-assigned ephemeral port
-		Theme:   theme,
-		Colemak: cfg.Colemak,
-		Watch:   true,
+		File:     src,
+		Port:     0, // kernel-assigned ephemeral port
+		Theme:    theme,
+		Colemak:  cfg.Colemak,
+		Watch:    true,
+		ExtraCSS: config.ExtraCSS(cfg, stderr),
 	}
 
 	if envFlagOn("MDP_NATIVE") && env.OpenWindow != nil {
@@ -577,10 +578,8 @@ func runServe(args []string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "mdp serve: invalid port %q\n", args[1])
 		return 1
 	}
-	colemak := false
-	if cfg, _ := config.Load(); cfg.Colemak {
-		colemak = true
-	}
+	cfg, _ := config.Load()
+	colemak := cfg.Colemak
 	if v := os.Getenv("MDP_COLEMAK"); v == "1" || v == "true" {
 		colemak = true
 	}
@@ -591,10 +590,11 @@ func runServe(args []string, stderr io.Writer) int {
 		}
 	}
 	opts := server.Options{
-		File:    args[0],
-		Port:    port,
-		Theme:   args[2],
-		Colemak: colemak,
+		File:     args[0],
+		Port:     port,
+		Theme:    args[2],
+		Colemak:  colemak,
+		ExtraCSS: config.ExtraCSS(cfg, stderr),
 	}
 	if err := server.Run(opts); err != nil {
 		fmt.Fprintf(stderr, "mdp serve: %v\n", err)
