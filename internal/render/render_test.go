@@ -113,8 +113,8 @@ func TestRenderListItems_EachItemAnnotated(t *testing.T) {
 	}
 }
 
-// Raw HTML in markdown is intentionally NOT rendered — see render.go
-// (WithUnsafe). These tests guard the security boundary.
+// Raw HTML in markdown is intentionally NOT rendered (see render.go
+// WithUnsafe). These tests guard the security boundary.
 
 func TestRenderHTMLBlock_RawHTMLOmitted(t *testing.T) {
 	src := "para\n\n<details>\n<summary>x</summary>\nhi\n</details>\n"

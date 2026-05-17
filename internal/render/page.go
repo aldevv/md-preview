@@ -5,17 +5,10 @@ import (
 	"strings"
 )
 
-// highlight.js theme CSS and the highlight.js bundle itself live in
-// assets.go (embedded via go:embed) and are inlined by BuildPage below.
-
-// vimKeysScriptTemplate implements hjkl + d/u + g/G + q (close window)
-// page navigation, ignoring keys while focus is in an editable element.
-// The __DOWN__/__UP__/__RIGHT__ placeholders are replaced with j/k/l
-// (qwerty) or n/e/i (colemak); h, d/u, g/G, and q are kept as-is in both
-// layouts (either home-row in colemak already or kept for mnemonic).
-// __RELOAD_CASE__ becomes the `r` reload binding in static mode and is
-// stripped in WS-backed modes (watch/serve), which drive their own
-// content refresh.
+// __DOWN__/__UP__/__RIGHT__ are replaced with j/k/l (qwerty) or n/e/i
+// (colemak); h, d/u, g/G, q are layout-stable. __RELOAD_CASE__ becomes
+// the `r` reload binding in static mode and is stripped in WS-backed
+// modes, which drive their own refresh.
 const vimKeysScriptTemplate = `
 (() => {
     const STEP = 60;
@@ -46,10 +39,6 @@ const vimKeysScriptTemplate = `
 })();
 `
 
-// vimKeys returns the navigation script with j/k/l (default) or n/e/i
-// (colemak) substituted in. When staticReload is true, pressing `r`
-// triggers location.reload() so the user can pull in changes after
-// re-running `mdp <file>`; WS-backed modes leave it out.
 func vimKeys(colemak, staticReload bool) string {
 	down, up, right := "j", "k", "l"
 	if colemak {
@@ -66,8 +55,7 @@ func vimKeys(colemak, staticReload bool) string {
 	return s
 }
 
-// wsScriptTemplate is the WebSocket scroll/reload client; __PORT__ is replaced
-// with the server port at runtime.
+// __PORT__ is replaced with the server port at runtime.
 const wsScriptTemplate = `
 function absDocTop(el) {
     let y = 0;
@@ -161,16 +149,13 @@ document.getElementById('content').addEventListener('click', (e) => {
     if (!a) return;
     const href = a.getAttribute('href');
     if (!href) return;
-    // Skip anchor links (browser handles) and external schemes.
     if (href.startsWith('#') || /^[a-z][a-z0-9+.-]*:/i.test(href)) return;
     e.preventDefault();
-    // Resolve relative hrefs against the current file's directory.
     let target = href;
     if (!target.startsWith('/') && window.mdpCurrentFile) {
         const dir = window.mdpCurrentFile.replace(/\/[^/]*$/, '');
         target = dir + '/' + href;
     }
-    // Normalize . and .. segments.
     const parts = target.split('/');
     const out = [];
     for (const seg of parts) {
@@ -202,17 +187,15 @@ document.getElementById('content').addEventListener('click', (e) => {
 });
 
 ws.onclose = () => {
-    // When the server exits (mdp watch Ctrl-C, or the nvim plugin shutting
-    // down) the WS closes. window.close() works for chrome --app= popups;
-    // for regular tabs (xdg-open / firefox --new-window) browsers block the
-    // call silently. We replace the body either way so it's obvious the
-    // preview is dead — the nvim plugin's xdotool/wmctrl fallback can still
-    // kill the tab from outside.
+    // window.close() works for chrome --app= popups; regular tabs
+    // (xdg-open, firefox --new-window) silently ignore it. The body
+    // replacement is the visible fallback; the nvim plugin's
+    // xdotool/wmctrl path can still close the tab from outside.
     try { window.close(); } catch (_) {}
     setTimeout(() => {
         document.body.innerHTML =
             '<p style="font-family:sans-serif;padding:2rem;opacity:0.5">' +
-            'md-preview server stopped — you can close this tab.</p>';
+            'md-preview server stopped, you can close this tab.</p>';
     }, 50);
 };
 `
@@ -280,7 +263,6 @@ function mdpNavigatedTo(target) {
   const cur = window.mdpCurrentFile;
   if (!cur) return;
   if (mdpIdx >= 0 && mdpStack[mdpIdx] === cur) {
-    // in sync
   } else if (mdpIdx >= 1 && mdpStack[mdpIdx - 1] === cur) {
     mdpIdx--;
   } else if (mdpIdx >= 0 && mdpStack[mdpIdx + 1] === cur) {
@@ -352,16 +334,9 @@ __WS_SCRIPT__
 </body>
 </html>`
 
-// BuildPage wraps an HTML body in the preview page template.
-//
-// theme selects the color palette: "dark" (default) or "light".
-// wsPort > 0 embeds the WebSocket scroll/reload client.
-// extraCSS is appended after the default CSS so it wins via cascade.
-// colemak swaps the in-page nav keys from j/k/l to n/e/i.
-// currentFile is the absolute path of the document being rendered,
-// exposed to the click handler so it can resolve relative hrefs
-// against its directory. Empty when no file context is meaningful
-// (e.g. ad-hoc RenderBytes callers).
+// currentFile is the absolute path the click handler resolves
+// relative hrefs against; empty when no file context applies (ad-hoc
+// RenderBytes callers). wsPort > 0 embeds the WS client.
 func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, currentFile string) string {
 	cssVars := CSSDark
 	hljsThemeCSS := hljsThemeDarkCSS
@@ -418,15 +393,10 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, cu
 	).Replace(pageTemplate)
 }
 
-// hasMermaid reports whether the rendered body contains a mermaid
-// fence (emitMermaidFence stamps class="mermaid"). Used by BuildPage
-// to skip the ~3.3 MiB mermaid bundle for pages with no diagrams.
 func hasMermaid(body string) bool {
 	return strings.Contains(body, `class="mermaid"`)
 }
 
-// mermaidTheme maps mdp's theme name to a mermaid built-in theme so
-// rendered diagrams visually match the surrounding page chrome.
 func mermaidTheme(theme string) string {
 	if theme == "light" {
 		return "default"
@@ -438,10 +408,9 @@ func hasCodeFence(body string) bool {
 	return strings.Contains(body, `<code class="language-`)
 }
 
-// hasMath checks whether the rendered body has any math markers worth
-// loading KaTeX for. Single-dollar delimiters are intentionally NOT
-// detected: KaTeX auto-render isn't configured for them (prose like
-// `Costs $5 and $10` produced too many false positives).
+// Single-dollar delimiters are intentionally NOT detected: KaTeX
+// auto-render isn't configured for them (prose like `Costs $5 and $10`
+// produced too many false positives).
 func hasMath(body string) bool {
 	for _, marker := range []string{
 		`\(`, `\[`, `$$`,
