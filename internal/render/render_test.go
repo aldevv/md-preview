@@ -426,13 +426,11 @@ func TestRenderBody_MissingFile(t *testing.T) {
 }
 
 func TestBuildPage_DarkTheme(t *testing.T) {
-	page := BuildPage("<p>x</p>", "dark", 0, "", false, "")
+	page := BuildPage(`<pre><code class="language-go">x</code></pre>`, "dark", 0, "", false, "")
 	wants := []string{
 		"--color-bg-primary: #0d1117",
-		// dark hljs theme: code background is #0d1117
 		"pre code.hljs",
 		"background:#0d1117",
-		// inline highlight.js, not a CDN link
 		"var hljs=function()",
 		"case 'j':",
 	}
@@ -447,10 +445,9 @@ func TestBuildPage_DarkTheme(t *testing.T) {
 }
 
 func TestBuildPage_LightTheme(t *testing.T) {
-	page := BuildPage("<p>x</p>", "light", 0, "", false, "")
+	page := BuildPage(`<pre><code class="language-go">x</code></pre>`, "light", 0, "", false, "")
 	wants := []string{
 		"--color-bg-primary: #ffffff",
-		// light hljs theme: code background is #fff
 		"pre code.hljs",
 		"background:#fff",
 		"var hljs=function()",
@@ -462,6 +459,24 @@ func TestBuildPage_LightTheme(t *testing.T) {
 	}
 	if strings.Contains(page, "cdnjs.cloudflare.com") {
 		t.Errorf("page must not reference cdnjs.cloudflare.com (assets are embedded)")
+	}
+}
+
+func TestBuildPage_OmitsHljsForProse(t *testing.T) {
+	page := BuildPage("<p>just prose, no fences</p>", "dark", 0, "", false, "")
+	for _, bad := range []string{"var hljs=function()", "hljs.highlightAll();", "pre code.hljs"} {
+		if strings.Contains(page, bad) {
+			t.Errorf("prose-only page should omit %q", bad)
+		}
+	}
+}
+
+func TestBuildPage_IncludesHljsForCodeFence(t *testing.T) {
+	page := BuildPage(`<pre><code class="language-go">package main</code></pre>`, "dark", 0, "", false, "")
+	for _, want := range []string{"var hljs=function()", "hljs.highlightAll();", "pre code.hljs"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("code-fence page should include %q", want)
+		}
 	}
 }
 

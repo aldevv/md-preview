@@ -113,7 +113,7 @@ ws.onmessage = (e) => {
             const doc = new DOMParser().parseFromString(html, 'text/html');
             document.querySelector('#content').innerHTML =
                 doc.querySelector('#content').innerHTML;
-            hljs.highlightAll();
+            if (typeof hljs !== 'undefined') hljs.highlightAll();
             mdpRenderMath();
             cacheEls();
         });
@@ -259,6 +259,15 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, cu
 		mermaidJSOut = mermaidScript
 		mermaidInit = `mermaid.initialize({startOnLoad:true,theme:'` + mermaidTheme(theme) + `'});`
 	}
+	// Skip the ~121 KiB highlight.js bundle + theme CSS when the body
+	// has no fenced code with a language. hljsHighlightCall is omitted
+	// alongside so the page doesn't ReferenceError on hljs.
+	hljsThemeOut, hljsScriptOut, hljsHighlightCall := "", "", ""
+	if hasCodeFence(body) {
+		hljsThemeOut = hljsThemeCSS
+		hljsScriptOut = hljsScript
+		hljsHighlightCall = "hljs.highlightAll();"
+	}
 
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html>
@@ -366,7 +375,7 @@ document.addEventListener('click', (e) => {
   window.open(href, '_blank', 'noopener,noreferrer');
 });
 %s
-hljs.highlightAll();
+%s
 %s
 %s
 function mdpRenderMath() {
@@ -388,7 +397,7 @@ mdpRenderMath();
 %s
 </script>
 </body>
-</html>`, hljsThemeCSS, cssVars, CSSCommon, pandocCSS, chromeCSS, katexCSSOut, extraCSS, body, currentFileJS, hljsScript, katexJSOut, katexAutoRenderJSOut, mermaidJSOut, mermaidInit, vimKeys(colemak, wsPort == 0), wsScript)
+</html>`, hljsThemeOut, cssVars, CSSCommon, pandocCSS, chromeCSS, katexCSSOut, extraCSS, body, currentFileJS, hljsScriptOut, hljsHighlightCall, katexJSOut, katexAutoRenderJSOut, mermaidJSOut, mermaidInit, vimKeys(colemak, wsPort == 0), wsScript)
 }
 
 // hasMermaid reports whether the rendered body contains a mermaid
@@ -405,6 +414,10 @@ func mermaidTheme(theme string) string {
 		return "default"
 	}
 	return "dark"
+}
+
+func hasCodeFence(body string) bool {
+	return strings.Contains(body, `<code class="language-`)
 }
 
 // hasMath checks whether the rendered body has any math markers worth
