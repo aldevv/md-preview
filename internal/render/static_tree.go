@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/aldevv/md-preview/internal/render/pandoc"
@@ -54,8 +56,9 @@ func TmpHTMLPath(tmpDir, source string) string {
 
 // RenderStaticTree pre-renders entry plus every reachable walkable
 // file (markdown via goldmark, anything pandoc accepts via pandoc)
-// inside filepath.Dir(entry). BFS is capped at MaxFiles. Outgoing
-// links between rendered files rewrite to file:// URLs so a
+// inside filepath.Dir(entry). BFS is capped at MaxFiles and renders
+// each wave's batch in parallel across runtime.NumCPU() workers.
+// Outgoing links between rendered files rewrite to file:// URLs so a
 // static-mode preview navigates without a server. Out-of-tree,
 // missing, over-cap, and symlink-escape links rewrite to a
 // javascript:mdpStaticToast(...) sentinel. Returns the entry's tmp
@@ -78,31 +81,34 @@ func RenderStaticTree(entry, tmpDir string, opts StaticTreeOptions) (string, err
 		maxFiles = StaticTreeMaxFiles
 	}
 
-	// BFS through walkable links inside rootDir. bodies[resolved] holds
-	// the rendered output keyed on the symlink-resolved path so two
-	// hrefs aimed at the same physical file dedup correctly and a link
-	// target outside rootDir (via symlink) can't slip past confinement.
+	// Wave-parallel BFS through walkable links inside rootDir.
+	// bodies[resolved] holds the rendered output keyed on the
+	// symlink-resolved path. Each wave renders its batch in parallel
+	// (pandoc subprocesses are the bottleneck); hrefs discovered
+	// across the wave feed the next.
 	bodies := map[string]string{}
 	seen := map[string]bool{resolvedEntry: true}
 	queue := []string{resolvedEntry}
 	for len(queue) > 0 && len(bodies) < maxFiles {
-		cur := queue[0]
-		queue = queue[1:]
-		body, err := RenderBody(cur)
-		if err != nil {
-			if cur == resolvedEntry {
-				return "", err
-			}
-			body = `<p>Error rendering ` + gohtml.EscapeString(cur) + `: ` + gohtml.EscapeString(err.Error()) + `</p>`
+		batch := queue
+		queue = nil
+		if room := maxFiles - len(bodies); len(batch) > room {
+			batch = batch[:room]
 		}
-		bodies[cur] = body
-		for _, href := range extractLinkHrefs(body) {
-			resolved := resolveWalkTarget(href, filepath.Dir(cur), rootDir)
-			if resolved == "" || seen[resolved] {
-				continue
+		results, err := renderBatch(batch, resolvedEntry)
+		if err != nil {
+			return "", err
+		}
+		for _, r := range results {
+			bodies[r.path] = r.body
+			for _, href := range extractLinkHrefs(r.body) {
+				resolved := resolveWalkTarget(href, filepath.Dir(r.path), rootDir)
+				if resolved == "" || seen[resolved] {
+					continue
+				}
+				seen[resolved] = true
+				queue = append(queue, resolved)
 			}
-			seen[resolved] = true
-			queue = append(queue, resolved)
 		}
 	}
 
@@ -126,6 +132,57 @@ func RenderStaticTree(entry, tmpDir string, opts StaticTreeOptions) (string, err
 		}
 	}
 	return rendered[resolvedEntry], nil
+}
+
+type renderResult struct {
+	path string
+	body string
+	err  error
+}
+
+// renderBatch fans the paths out across runtime.NumCPU() workers and
+// blocks until every render finishes. A failure on resolvedEntry
+// aborts the whole walk; failures on sub-files fall through to an
+// inline error body so one bad link doesn't take down the tree.
+func renderBatch(paths []string, resolvedEntry string) ([]renderResult, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	workers := runtime.NumCPU()
+	if workers > len(paths) {
+		workers = len(paths)
+	}
+	jobs := make(chan string, len(paths))
+	for _, p := range paths {
+		jobs <- p
+	}
+	close(jobs)
+	resultsCh := make(chan renderResult, len(paths))
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for p := range jobs {
+				body, err := RenderBody(p)
+				resultsCh <- renderResult{path: p, body: body, err: err}
+			}
+		}()
+	}
+	wg.Wait()
+	close(resultsCh)
+
+	out := make([]renderResult, 0, len(paths))
+	for r := range resultsCh {
+		if r.err != nil {
+			if r.path == resolvedEntry {
+				return nil, r.err
+			}
+			r.body = `<p>Error rendering ` + gohtml.EscapeString(r.path) + `: ` + gohtml.EscapeString(r.err.Error()) + `</p>`
+		}
+		out = append(out, r)
+	}
+	return out, nil
 }
 
 // resolveWalkTarget resolves href to a symlink-confined absolute path
