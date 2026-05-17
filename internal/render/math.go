@@ -11,9 +11,8 @@ import (
 	"github.com/yuin/goldmark/util"
 )
 
-// mathInlineNode carries inline math markup (with delimiters intact)
-// past goldmark's backslash-escape parser so the page-template
-// KaTeX auto-render picks it up unchanged.
+// Delimiters stay intact in raw so KaTeX's browser-side auto-render
+// picks the markup up unchanged.
 type mathInlineNode struct {
 	ast.BaseInline
 	display bool
@@ -25,8 +24,6 @@ var kindMathInline = ast.NewNodeKind("MathInline")
 func (n *mathInlineNode) Kind() ast.NodeKind                  { return kindMathInline }
 func (n *mathInlineNode) Dump(source []byte, level int)       { ast.DumpHelper(n, source, level, nil, nil) }
 
-// mathBlockNode is the block-level cousin used by the block parser
-// (which must return a Block AST node, not an Inline one).
 type mathBlockNode struct {
 	ast.BaseBlock
 	raw []byte
@@ -42,9 +39,8 @@ const (
 	mathDisplay = true
 )
 
-// mathInlineParser recognizes single-line `\(...\)`, `\[...\]`,
-// `$...$`, `$$...$$` math at priority above the default
-// BackslashEscapeParser so the leading `\` doesn't get stripped.
+// Registered above the default BackslashEscapeParser so the leading
+// `\` in `\(...\)` / `\[...\]` survives.
 type mathInlineParser struct{}
 
 func (p *mathInlineParser) Trigger() []byte { return []byte{'\\', '$'} }
@@ -113,8 +109,6 @@ func isSpace(b byte) bool {
 	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
 }
 
-// mathBlockParser recognizes `$$...$$` and `\[...\]` blocks owning
-// their own line(s), single-line or multi-line.
 type mathBlockParser struct{}
 
 func (b *mathBlockParser) Trigger() []byte { return []byte{'$', '\\'} }
@@ -131,7 +125,6 @@ func (b *mathBlockParser) Open(parent ast.Node, reader text.Reader, pc parser.Co
 	default:
 		return nil, parser.NoChildren
 	}
-	// Single-line form: `$$ x $$` on its own line.
 	if bytes.HasSuffix(trim, close) && len(trim) > len(open)+len(close) {
 		raw := append([]byte{}, trim...)
 		reader.Advance(len(line))
@@ -139,7 +132,6 @@ func (b *mathBlockParser) Open(parent ast.Node, reader text.Reader, pc parser.Co
 		parent.AppendChild(parent, n)
 		return n, parser.NoChildren
 	}
-	// Otherwise the opener line must be just the open marker.
 	if !bytes.Equal(trim, open) {
 		return nil, parser.NoChildren
 	}
@@ -173,9 +165,6 @@ func (b *mathBlockParser) Close(node ast.Node, reader text.Reader, pc parser.Con
 func (b *mathBlockParser) CanInterruptParagraph() bool                                { return true }
 func (b *mathBlockParser) CanAcceptIndentedLine() bool                                { return false }
 
-// mathRenderer writes math nodes' raw bytes verbatim (with data-line
-// stamping for blocks). KaTeX auto-render in the browser handles the
-// delimited content.
 type mathRenderer struct{}
 
 func (r *mathRenderer) RegisterFuncs(reg renderer.NodeRendererFuncRegisterer) {
@@ -211,9 +200,8 @@ func (r *mathRenderer) renderBlock(w util.BufWriter, source []byte, node ast.Nod
 	return ast.WalkContinue, nil
 }
 
-// Math is the goldmark extension wiring the math parsers + renderer.
-// Register at priority above the default BackslashEscapeParser (200)
-// so `\(`, `\[`, `\,` inside math regions don't get consumed.
+// Math registers at priority above the default BackslashEscapeParser
+// (200) so `\(`, `\[`, `\,` inside math regions survive.
 var Math goldmark.Extender = mathExtension{}
 
 type mathExtension struct{}

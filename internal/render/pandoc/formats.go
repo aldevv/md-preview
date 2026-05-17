@@ -5,15 +5,11 @@ import (
 	"strings"
 )
 
-// pandocExtFormat maps a lowercase file extension (with leading dot)
-// to the pandoc --from name. Only extensions that unambiguously
-// identify a pandoc input format are listed; markdown is intentionally
-// absent (mdp routes .md through goldmark, not pandoc).
-//
-// Formats whose only "extension" is a flavor of plain text and so
-// need a --from CLI flag to disambiguate (gfm, commonmark,
-// commonmark_x, markdown_strict, markdown_mmd, markdown_phpextra,
-// markdown_github, native, json, xml) are not in this table.
+// markdown is intentionally absent (mdp routes .md through goldmark).
+// Plain-text-flavor formats that need a --from flag to disambiguate
+// (gfm, commonmark, commonmark_x, markdown_strict, markdown_mmd,
+// markdown_phpextra, markdown_github, native, json, xml) are also
+// excluded; the extension alone can't pick the right flavor.
 var pandocExtFormat = map[string]string{
 	".tex":       "latex",
 	".latex":     "latex",
@@ -60,10 +56,6 @@ var pandocExtFormat = map[string]string{
 	".bits":      "bits",
 }
 
-// InputFormat returns the pandoc --from name for path's extension, or
-// "" if the extension isn't a recognized pandoc input format. Callers
-// use the empty return to fall back to goldmark (for .md) or to reject
-// the file.
 func InputFormat(path string) string {
 	return pandocExtFormat[strings.ToLower(filepath.Ext(path))]
 }

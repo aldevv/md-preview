@@ -10,10 +10,8 @@ import (
 
 var imgSrcRE = regexp.MustCompile(`(<img\b[^>]*\bsrc=")([^"]+)(")`)
 
-// RewriteImgSrc rewrites every local <img src="..."> in gohtml. build is
-// called with the absolute filesystem path the src resolves to relative
-// to baseDir; ok=false preserves the original src so callers can refuse
-// out-of-tree paths without breaking sibling imgs.
+// build returning ok=false preserves the original src so callers can
+// refuse out-of-tree paths without breaking sibling imgs.
 func RewriteImgSrc(html, baseDir string, build func(absPath string) (string, bool)) string {
 	return imgSrcRE.ReplaceAllStringFunc(html, func(match string) string {
 		groups := imgSrcRE.FindStringSubmatch(match)
@@ -67,7 +65,6 @@ func hasURLScheme(s string) bool {
 	return false
 }
 
-// FileURL returns a percent-encoded file:// URL for absPath.
 func FileURL(absPath string) string {
 	u := url.URL{Scheme: "file", Path: absPath}
 	return u.String()

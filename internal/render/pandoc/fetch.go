@@ -27,8 +27,7 @@ const Version = "3.9.0.2"
 // the pinned auto-fetch version can read the requested input format.
 var ErrFormatUnsupported = errors.New("pandoc: format not supported")
 
-// downloadPandocFn lets tests replace the network-touching download
-// step without exposing flag soup. Defaults to downloadPandoc.
+// downloadPandocFn is the test seam for the network-touching step.
 var downloadPandocFn = downloadPandoc
 
 // Ensure returns the path to a pandoc binary that handles format

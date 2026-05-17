@@ -49,15 +49,15 @@ func newMarkdown(sourceDir string) goldmark.Markdown {
 	)
 }
 
-// dataLineRenderer overrides goldmark's default rendering for code blocks
-// (whose default funcs ignore node attributes) so we can stamp data-line
-// on the generated <pre>.
+// dataLineRenderer overrides goldmark's default code-block rendering
+// so the generated <pre> can carry a data-line attribute (the default
+// funcs drop node attributes).
 type dataLineRenderer struct {
 	html.Config
-	// sourceDir is the directory of the source markdown file; passed to
+	// sourceDir is the markdown file's directory, threaded through to
 	// pandoc.Render so \input{} in fenced LaTeX resolves relative to
-	// the document, not to mdp's CWD. Empty for tests / RenderBytes
-	// callers that don't have a file backing them.
+	// the document instead of mdp's CWD. Empty for RenderBytes callers
+	// with no file backing.
 	sourceDir string
 }
 
@@ -100,10 +100,8 @@ func (d *dataLineRenderer) writeLines(w util.BufWriter, source []byte, n ast.Nod
 func (d *dataLineRenderer) renderFencedCodeBlock(w util.BufWriter, source []byte, node ast.Node, entering bool) (ast.WalkStatus, error) {
 	n := node.(*ast.FencedCodeBlock)
 	if format := pandocFenceFormat(n.Language(source)); format != "" {
-		// Both entering and !entering pass through here; emit the full
-		// <div>...</div> on entering and a no-op on closing. Children of
-		// a FencedCodeBlock are body lines (no separate AST nodes), so
-		// no walk-status special-casing is needed.
+		// Called twice (entering + leaving); emit the whole <div> once
+		// on entering. Fence bodies are leaf text, no child AST nodes.
 		if entering {
 			d.emitPandocFence(w, source, n, format)
 		}
@@ -133,8 +131,6 @@ func (d *dataLineRenderer) renderFencedCodeBlock(w util.BufWriter, source []byte
 	return ast.WalkContinue, nil
 }
 
-// isMermaidLang reports whether the fence info string requests
-// client-side mermaid rendering. Case-insensitive match on "mermaid".
 func isMermaidLang(language []byte) bool {
 	if language == nil {
 		return false
@@ -142,10 +138,8 @@ func isMermaidLang(language []byte) bool {
 	return strings.EqualFold(string(language), "mermaid")
 }
 
-// emitMermaidFence emits a `<pre class="mermaid" data-line=...>`
-// wrapping the raw fence body. mermaid.js (loaded conditionally by
-// the page template when this class is present) auto-runs on page
-// load and replaces each block with an inline SVG diagram.
+// The page template gates mermaid.js on the presence of pre.mermaid,
+// then auto-runs it to swap each block for an inline SVG.
 func (d *dataLineRenderer) emitMermaidFence(w util.BufWriter, source []byte, n *ast.FencedCodeBlock) {
 	_, _ = w.WriteString(`<pre class="mermaid"`)
 	writeDataLineAttr(w, n)
@@ -157,13 +151,6 @@ func (d *dataLineRenderer) emitMermaidFence(w util.BufWriter, source []byte, n *
 	_, _ = w.WriteString("</pre>\n")
 }
 
-// pandocFenceFormat maps a fenced-code info string to the pandoc
-// --from name it should be rendered with, or "" if the fence is
-// just regular code (passes through to the normal highlighter).
-// Recognized: latex/tex/pandoc-latex (→ latex), typst (→ typst).
-// Other formats with viable embedded-fence semantics can be added
-// here; not every pandoc input format makes sense embedded in
-// markdown.
 func pandocFenceFormat(language []byte) string {
 	if language == nil {
 		return ""
@@ -177,10 +164,8 @@ func pandocFenceFormat(language []byte) string {
 	return ""
 }
 
-// emitPandocFence renders the fence body via host pandoc using the
-// given --from format. On error the user-visible message is dropped
-// into a .pandoc-error div so the preview surfaces the failure
-// instead of silently dropping the block.
+// On render failure the error message goes into a .pandoc-error div
+// so the preview surfaces it instead of silently dropping the block.
 func (d *dataLineRenderer) emitPandocFence(w util.BufWriter, source []byte, n *ast.FencedCodeBlock, format string) {
 	var body bytes.Buffer
 	for i := 0; i < n.Lines().Len(); i++ {
@@ -234,9 +219,8 @@ func (d *dataLineRenderer) renderCodeBlock(w util.BufWriter, source []byte, n as
 	return ast.WalkContinue, nil
 }
 
-// lineRecorder wraps a BlockParser to stamp data-line on the opened node
-// using the reader's position at Open time. Used for kinds whose Lines()
-// don't include the opening line (e.g. thematic break, fenced code fence).
+// lineRecorder stamps data-line at Open() time for parsers whose
+// Lines() omits the opening line (thematic break, fenced code fence).
 type lineRecorder struct {
 	inner parser.BlockParser
 }
@@ -263,9 +247,6 @@ func (h *lineRecorder) Close(node ast.Node, reader text.Reader, pc parser.Contex
 func (h *lineRecorder) CanInterruptParagraph() bool { return h.inner.CanInterruptParagraph() }
 func (h *lineRecorder) CanAcceptIndentedLine() bool { return h.inner.CanAcceptIndentedLine() }
 
-// stripFrontmatter drops a leading YAML frontmatter block: if the first line
-// is "---", strip through the next "---" line. If no closing "---" is found,
-// return content unchanged.
 func stripFrontmatter(content string) string {
 	lines := strings.Split(content, "\n")
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
@@ -284,8 +265,6 @@ func stripFrontmatter(content string) string {
 	return strings.Join(lines[end+1:], "\n")
 }
 
-// lineIndex stores the byte offset of every line start in source so we can
-// resolve a byte offset to a 1-indexed line via binary search.
 type lineIndex struct {
 	starts []int
 }
@@ -301,7 +280,6 @@ func buildLineIndex(source []byte) *lineIndex {
 	return &lineIndex{starts: starts}
 }
 
-// lineOf returns a 1-indexed line number for the given byte offset.
 func (li *lineIndex) lineOf(offset int) int {
 	idx := sort.SearchInts(li.starts, offset+1) - 1
 	if idx < 0 {
@@ -310,9 +288,9 @@ func (li *lineIndex) lineOf(offset int) int {
 	return idx + 1
 }
 
-// firstSourceOffset returns the earliest source byte offset reachable from n
-// via Lines(). Falls back to descendants since list/list-item nodes wrap
-// children without Lines of their own. Returns -1 if none found.
+// list/list-item nodes wrap children without Lines() of their own, so
+// fall back to descending into children. Returns -1 when no source
+// offset is reachable.
 func firstSourceOffset(n ast.Node) int {
 	if n == nil {
 		return -1
@@ -348,10 +326,8 @@ func shouldAnnotate(n ast.Node) bool {
 	return false
 }
 
-// annotateLines walks the AST and sets data-line on every block node whose
-// origin can be traced to a source line. Nodes already annotated by a
-// custom block parser (e.g. thematic break, fenced code fence) are left
-// alone so the parser-recorded line wins.
+// Nodes already annotated by a custom block parser (thematic break,
+// fenced code fence) are skipped so the parser-recorded line wins.
 func annotateLines(doc ast.Node, source []byte) {
 	li := buildLineIndex(source)
 	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
@@ -371,9 +347,8 @@ func annotateLines(doc ast.Node, source []byte) {
 	})
 }
 
-// renderHTML parses the markdown source and renders it with line annotations.
-// sourceDir is threaded into fenced LaTeX rendering so \input{} resolves
-// relative to the source file's directory.
+// sourceDir threads to fenced LaTeX so \input{} resolves relative to
+// the source file's directory.
 func renderHTML(source []byte, sourceDir string) string {
 	md := newMarkdown(sourceDir)
 	reader := text.NewReader(source)
@@ -386,18 +361,11 @@ func renderHTML(source []byte, sourceDir string) string {
 	return buf.String()
 }
 
-// RenderBody reads filepath, strips YAML frontmatter, and renders it
-// to an HTML body with data-line="N" attributes (1-indexed) on every
-// block-level open tag whose origin can be traced to a source line.
-//
-// On read error, returns an HTML body and a non-nil error so callers
-// can decide whether to surface the failure. On pandoc-not-found for
-// pandoc-routed content, returns pandoc.ErrNotFound so the caller can
-// print a usable install hint and exit non-zero.
-//
-// File extension dispatches the renderer: any extension recognized by
-// pandoc.InputFormat goes through pandoc; everything else uses
-// goldmark.
+// RenderBody returns an HTML body with 1-indexed data-line="N" on
+// every block whose origin can be traced. Extensions in
+// pandoc.InputFormat dispatch to pandoc; everything else goes through
+// goldmark after YAML-frontmatter stripping. Returns pandoc.ErrNotFound
+// when the pandoc dispatch path needs the binary and it's absent.
 func RenderBody(path string) (string, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -415,9 +383,8 @@ func RenderBody(path string) (string, error) {
 	return renderHTML([]byte(stripped), sourceDir), nil
 }
 
-// RenderBytes is RenderBody for already-loaded content. Useful for tests and
-// in-memory callers. The fenced-LaTeX intercept won't be able to resolve
-// \input{} relative paths since the caller didn't supply a sourceDir.
+// RenderBytes is the in-memory variant. Fenced LaTeX's \input{}
+// resolution won't work since there's no source file backing it.
 func RenderBytes(content []byte) string {
 	stripped := stripFrontmatter(string(content))
 	return renderHTML([]byte(stripped), "")

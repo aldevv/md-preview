@@ -48,9 +48,6 @@ var (
 	}()
 )
 
-// hostSupports reports whether the pandoc binary at `bin` lists
-// `format` in its --list-input-formats output. Results are memoized
-// for the process lifetime.
 func hostSupports(bin, format string) bool {
 	hostFormatsMu.Lock()
 	defer hostFormatsMu.Unlock()
@@ -76,12 +73,9 @@ func probeInputFormats(bin string) map[string]bool {
 	return set
 }
 
-// Available reports whether a usable pandoc binary is already known
-// to mdp. Probe order: previously-auto-fetched cache first, then
-// $PATH. Cache wins because once we've ever fetched, that pinned
-// binary supports a known set of formats; the system pandoc may be
-// older and miss formats added in later releases. Does NOT download.
-// Call Ensure to download on demand.
+// Available probes cache first then $PATH. The auto-fetched cache
+// wins because the pinned binary supports a known format set; the
+// system pandoc may be older. Does NOT download; call Ensure for that.
 func Available() bool {
 	probeMu.Lock()
 	defer probeMu.Unlock()
@@ -99,9 +93,6 @@ func Available() bool {
 	return false
 }
 
-// ResetProbe clears the cached probe result and the per-binary
-// supported-formats memo. Tests use this with t.Setenv("PATH", ...)
-// to exercise multiple states in one process.
 func ResetProbe() {
 	probeMu.Lock()
 	binPath = ""
@@ -111,11 +102,10 @@ func ResetProbe() {
 	hostFormatsMu.Unlock()
 }
 
-// Render shells out to host pandoc and returns sanitized HTML5. format
-// is the pandoc --from name (e.g. "latex", "rst", "docx"); pass
-// "latex" for fenced ```latex blocks. sourceDir is the pandoc CWD so
-// \input{}/\includegraphics{} relative paths resolve correctly; pass
-// "" for fences with no surrounding file.
+// Render returns sanitized HTML5. format is a pandoc --from name
+// (defaults to "latex"). sourceDir becomes pandoc's CWD so
+// \input{}/\includegraphics{} relative paths resolve; pass "" when
+// rendering a fence with no surrounding file.
 func Render(ctx context.Context, src []byte, sourceDir, format string) (string, error) {
 	if !Available() {
 		return "", ErrNotFound
@@ -132,10 +122,8 @@ func Render(ctx context.Context, src []byte, sourceDir, format string) (string, 
 		"--no-highlight",
 		"--sandbox",
 	}
-	// Bibliography formats parse fine without --citeproc but produce
-	// empty output because pandoc treats the file as citation data
-	// rather than prose. --citeproc renders every entry as the page
-	// body, which is what a "preview this .bib" user actually wants.
+	// Without --citeproc, bibliography formats parse but emit empty
+	// output (pandoc treats them as citation data, not prose).
 	switch format {
 	case "biblatex", "bibtex", "ris", "endnotexml", "csljson":
 		args = append(args, "--citeproc")
