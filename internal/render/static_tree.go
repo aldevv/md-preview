@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -142,7 +143,7 @@ type renderResult struct {
 	err  error
 }
 
-// renderBatch fans the paths out across runtime.NumCPU() workers and
+// renderBatch fans the paths out across a bounded pool of workers and
 // blocks until every render finishes. A failure on resolvedEntry
 // aborts the whole walk; failures on sub-files fall through to an
 // inline error body so one bad link doesn't take down the tree.
@@ -150,10 +151,7 @@ func renderBatch(paths []string, resolvedEntry string) ([]renderResult, error) {
 	if len(paths) == 0 {
 		return nil, nil
 	}
-	workers := runtime.NumCPU()
-	if workers > len(paths) {
-		workers = len(paths)
-	}
+	workers := pandocParallelism(len(paths))
 	jobs := make(chan string, len(paths))
 	for _, p := range paths {
 		jobs <- p
@@ -185,6 +183,32 @@ func renderBatch(paths []string, resolvedEntry string) ([]renderResult, error) {
 		out = append(out, r)
 	}
 	return out, nil
+}
+
+// pandocParallelism returns the worker count for a renderBatch of
+// jobCount jobs. MDP_PANDOC_PARALLELISM, when a positive integer,
+// overrides the default cap; non-positive or unparseable values fall
+// back. Result is clamped to [1, jobCount].
+func pandocParallelism(jobCount int) int {
+	if jobCount <= 0 {
+		return 0
+	}
+	workers := runtime.NumCPU()
+	if workers > 8 {
+		workers = 8
+	}
+	if v := os.Getenv("MDP_PANDOC_PARALLELISM"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			workers = n
+		}
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > jobCount {
+		workers = jobCount
+	}
+	return workers
 }
 
 // resolveWalkTarget resolves href to a symlink-confined absolute path

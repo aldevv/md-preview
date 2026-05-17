@@ -1,6 +1,7 @@
 package render
 
 import (
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -252,6 +253,69 @@ func TestRenderStaticTree_MaxFilesCap(t *testing.T) {
 	}
 	if _, err := os.Stat(TmpHTMLPath(tmp, b)); err == nil {
 		t.Errorf("b.md should NOT have been pre-rendered under cap=1")
+	}
+}
+
+// Race-detector smoke test: 12 pandoc renders fan out through
+// renderBatch in one wave; must come back with all bodies populated.
+func TestRenderStaticTree_ParallelBatch_NoRace(t *testing.T) {
+	if !pandoc.Available() {
+		t.Skip("pandoc not on PATH")
+	}
+	root := t.TempDir()
+	tmp := t.TempDir()
+	const siblings = 12
+	var b strings.Builder
+	b.WriteString("# entry\n")
+	for i := 0; i < siblings; i++ {
+		name := fmt.Sprintf("chap%02d.tex", i)
+		fmt.Fprintf(&b, "[c%d](%s)\n", i, name)
+		if err := os.WriteFile(filepath.Join(root, name), []byte(`\section{X}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entry := writeMD(t, root, "index.md", b.String())
+
+	if _, err := RenderStaticTree(entry, tmp, StaticTreeOptions{Theme: "dark"}); err != nil {
+		t.Fatalf("RenderStaticTree: %v", err)
+	}
+	for i := 0; i < siblings; i++ {
+		src := filepath.Join(root, fmt.Sprintf("chap%02d.tex", i))
+		if _, err := os.Stat(TmpHTMLPath(tmp, src)); err != nil {
+			t.Errorf("chap%02d.tex should have been pre-rendered: %v", i, err)
+		}
+	}
+}
+
+func TestPandocParallelism_EnvOverrideClamps(t *testing.T) {
+	cases := []struct {
+		name    string
+		env     string
+		jobs    int
+		wantMin int
+		wantMax int
+	}{
+		{"empty falls back to default cap", "", 4, 1, 4},
+		{"zero env ignored, falls back", "0", 4, 1, 4},
+		{"negative env ignored, falls back", "-3", 4, 1, 4},
+		{"garbage env ignored, falls back", "not-a-number", 4, 1, 4},
+		{"override exceeds default cap", "16", 32, 16, 16},
+		{"override capped by jobCount", "16", 4, 4, 4},
+		{"jobCount zero returns zero", "8", 0, 0, 0},
+		{"override of 1 honored", "1", 4, 1, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("MDP_PANDOC_PARALLELISM", tc.env)
+			got := pandocParallelism(tc.jobs)
+			if got < tc.wantMin || got > tc.wantMax {
+				t.Errorf("pandocParallelism(%d) with env=%q = %d, want in [%d,%d]",
+					tc.jobs, tc.env, got, tc.wantMin, tc.wantMax)
+			}
+			if tc.jobs > 0 && got < 1 {
+				t.Errorf("pandocParallelism(%d) with env=%q = %d, want >= 1", tc.jobs, tc.env, got)
+			}
+		})
 	}
 }
 
