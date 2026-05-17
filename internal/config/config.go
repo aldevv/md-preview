@@ -45,7 +45,7 @@ func Path() string {
 // defaultConfigTemplate is the scaffold seeded by EnsureDefault. Every key
 // is commented so seeding is behaviorally a no-op until the user opts in;
 // the file's purpose is discoverability.
-const defaultConfigTemplate = `# md-preview config — uncomment any line to override the built-in default.
+const defaultConfigTemplate = `# md-preview config: uncomment any line to override the built-in default.
 
 # theme      = "dark"           # "dark" or "light"
 # font_size  = 18               # body font-size in px
@@ -195,7 +195,7 @@ var autoBrowserFamilies = []struct {
 	},
 }
 
-// autoMacAppBundles — chromium browsers on macOS ship as .app bundles with
+// autoMacAppBundles: chromium browsers on macOS ship as .app bundles with
 // nothing on $PATH, so the PATH probe below misses them and a homebrew
 // firefox shim wins. Probe these first on darwin to keep --app= mode.
 var autoMacAppBundles = []string{

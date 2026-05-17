@@ -74,7 +74,7 @@ func TestInputFormat(t *testing.T) {
 }
 
 // pandocInputFormats lists what the *resolved* pandoc claims it can
-// read — same binary Render will shell out to. We skip-with-reason
+// read (same binary Render will shell out to). We skip-with-reason
 // for formats that landed in newer releases (asciidoc-input in 3.6,
 // djot in 3.5, pptx/xlsx-input in 3.5, etc.) when CI runs against an
 // older pandoc.

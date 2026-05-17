@@ -13,7 +13,7 @@ import (
 	"github.com/yuin/goldmark/util"
 )
 
-// Alert is the AST node for a GitHub-style alert blockquote — recognised
+// Alert is the AST node for a GitHub-style alert blockquote, recognised
 // when a blockquote's first line is "[!NOTE]" (or TIP / IMPORTANT / WARNING
 // / CAUTION). Renders as `<div class="markdown-alert markdown-alert-...">`.
 type Alert struct {
@@ -118,7 +118,7 @@ func detectAlertKind(bq *ast.Blockquote, source []byte) (string, int) {
 }
 
 // stripFirstInlineLine removes inline children up to and including the first
-// soft/hard line break — i.e. drops the `[!TYPE]` line from the paragraph.
+// soft/hard line break (drops the `[!TYPE]` line from the paragraph).
 // Goldmark joins paragraph lines as Text nodes with SoftLineBreak() set on
 // all but the last; brackets/exclamation in `[!TYPE]` are not syntax, so
 // the line resolves to plain Text node(s) on a single line.

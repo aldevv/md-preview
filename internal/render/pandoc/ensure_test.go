@@ -161,7 +161,7 @@ func TestHostSupports_Memoizes(t *testing.T) {
 	if !hostSupports(bin, "rst") {
 		t.Error("hostSupports(rst) returned false on first call")
 	}
-	// Overwrite the script to claim it supports nothing — if memoization
+	// Overwrite the script to claim it supports nothing. If memoization
 	// works, the second call still reports rst as supported.
 	writeFakePandoc(t, pathDir, "pandoc", []string{})
 	if !hostSupports(bin, "rst") {

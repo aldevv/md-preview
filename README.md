@@ -1,8 +1,8 @@
-# mdp — instant markdown preview in your browser
+# mdp: instant markdown preview in your browser
 
 [![Latest release](https://img.shields.io/github/v/release/aldevv/md-preview)](https://github.com/aldevv/md-preview/releases)
 
-Preview any `.md` file in a real browser tab — single static binary. Pairs with [md-preview.nvim](https://github.com/aldevv/md-preview.nvim) for live scroll-sync (the editor cursor tracks the rendered page).
+Preview any `.md` file in a real browser tab: single static binary. Pairs with [md-preview.nvim](https://github.com/aldevv/md-preview.nvim) for live scroll-sync (the editor cursor tracks the rendered page).
 
 https://github.com/user-attachments/assets/19f64fa1-a4d6-4a9c-a94f-2c40ca5a979b
 
@@ -11,7 +11,7 @@ https://github.com/user-attachments/assets/19f64fa1-a4d6-4a9c-a94f-2c40ca5a979b
 > [!NOTE]
 > Linux and macOS only (amd64 / arm64). Windows is not supported.
 
-One-liner — uses `go install` if Go is on `PATH`, otherwise downloads a prebuilt release tarball:
+One-liner that uses `go install` if Go is on `PATH`, otherwise downloads a prebuilt release tarball:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/aldevv/md-preview/main/install.sh | sh
@@ -29,7 +29,7 @@ Or directly with Go:
 go install github.com/aldevv/md-preview/cmd/mdp@latest
 ```
 
-- Prebuilt binaries — [Releases page](https://github.com/aldevv/md-preview/releases).
+- Prebuilt binaries: [Releases page](https://github.com/aldevv/md-preview/releases).
 - Building from source needs Go 1.26.2+ (release users don't).
 
 Verify the install:
@@ -49,7 +49,7 @@ mdp update --check   # just report whether an update is available
 
 ### Optional: `fzf`
 
-[`fzf`](https://github.com/junegunn/fzf) is the fuzzy-finder used by the no-arg picker mode — `mdp` with no file argument fzf-picks a `.md` from the current directory. If `fzf` is missing, the help text is printed instead.
+[`fzf`](https://github.com/junegunn/fzf) is the fuzzy-finder used by the no-arg picker mode: `mdp` with no file argument fzf-picks a `.md` from the current directory. If `fzf` is missing, the help text is printed instead.
 
 ## Usage
 
@@ -67,7 +67,7 @@ mdp help                       # show help
 ```
 
 `mdp watch` keeps `mdp` running and the browser refreshes whenever the file
-is saved — editor-agnostic (works with VS Code, Sublime, vim, Helix, your
+is saved (editor-agnostic: VS Code, Sublime, vim, Helix, your
 `$EDITOR`, anything that writes to disk). Ctrl-C to stop; the preview tab
 closes with it (chrome `--app=` mode) or shows a "server stopped" notice.
 
@@ -104,7 +104,7 @@ Coverage matches Pandoc: sectioning, lists, refs, tables, common math, citations
 
 ### Notes
 
-The default preview is static — re-run `mdp` to refresh, use `mdp watch` for
+The default preview is static: re-run `mdp` to refresh, use `mdp watch` for
 auto-refresh on save (any editor), or install the
 [Neovim plugin](#neovim-plugin) for live scroll-sync.
 
@@ -132,7 +132,7 @@ CLI flags override config values.
 
 ## Neovim plugin
 
-For live scroll-sync — where the rendered page tracks your editor cursor as you scroll the source — install the sibling plugin:
+For live scroll-sync (the rendered page tracks your editor cursor as you scroll the source) install the sibling plugin:
 
 - [aldevv/md-preview.nvim](https://github.com/aldevv/md-preview.nvim)
 
@@ -156,4 +156,4 @@ make install  # go install ./cmd/mdp
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).

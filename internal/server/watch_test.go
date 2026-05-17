@@ -9,7 +9,7 @@ import (
 )
 
 // waitForVersion polls s.renderVersion until it reaches want or the deadline
-// expires. Returns the final version seen. Polling beats a fixed sleep — it
+// expires. Returns the final version seen. Polling beats a fixed sleep: it
 // keeps the test fast on a quick watcher and tolerant on a slow CI box.
 func waitForVersion(s *state, want int, deadline time.Duration) int {
 	end := time.Now().Add(deadline)
@@ -42,7 +42,7 @@ func TestWatchFile_BumpsVersionOnChange(t *testing.T) {
 	go watchFile(ctx, s)
 
 	// Ensure the watcher captures a baseline mtime before we modify the
-	// file — otherwise on a very fast box the change could land in the
+	// file; otherwise on a very fast box the change could land in the
 	// same tick as baseline-capture and be elided.
 	time.Sleep(50 * time.Millisecond)
 

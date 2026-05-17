@@ -101,7 +101,7 @@ const usage = `Usage: mdp [flags] [file]
 Render a markdown file in a browser.
 
 If no file is given, mdp uses fzf to pick one interactively. fzf must be
-on PATH for the picker — pass a file argument otherwise.
+on PATH for the picker, pass a file argument otherwise.
 
 Flags:
   -e, --edit       Also open the file in nvim after launching the preview
