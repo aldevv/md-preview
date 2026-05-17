@@ -33,77 +33,79 @@ type StaticTreeOptions struct {
 }
 
 // TmpHTMLPath returns the stable per-source tmp HTML file used by
-// the static link-graph walker (and the single-file `mdp <file>`
-// path that doesn't traverse). sha1 of the absolute source path
-// keeps cross-file collisions out and lets re-runs overwrite in
-// place rather than accumulate.
+// the static link-graph walker. sha1 of the symlink-resolved abs
+// source path keeps two callers of the same physical file from
+// computing different tmp filenames (e.g. macOS /var/folders vs
+// /private/var/folders, or a sibling symlink to the same target).
+// Falls back to filepath.Abs when EvalSymlinks fails so callers can
+// still derive a path before the file exists.
 func TmpHTMLPath(tmpDir, source string) string {
-	abs, err := filepath.Abs(source)
+	resolved, err := filepath.EvalSymlinks(source)
 	if err != nil {
-		abs = source
+		if abs, aerr := filepath.Abs(source); aerr == nil {
+			resolved = abs
+		} else {
+			resolved = source
+		}
 	}
-	sum := sha1.Sum([]byte(abs))
+	sum := sha1.Sum([]byte(resolved))
 	return filepath.Join(tmpDir, "mdp-"+hex.EncodeToString(sum[:])[:12]+".html")
 }
 
-// RenderStaticTree pre-renders entry plus every reachable .md file
-// inside filepath.Dir(entry) (BFS, capped at MaxFiles). Each
-// rendered .md gets its own TmpHTMLPath; outgoing links between
-// them rewrite to file:// URLs so a static-mode preview navigates
-// without a server. Links to non-md / out-of-tree / missing files
-// become javascript:mdpStaticToast(...) sentinels that pop a toast
-// instead of broken navigations. Returns the entry's tmp HTML path.
+// RenderStaticTree pre-renders entry plus every reachable walkable
+// file (markdown via goldmark, anything pandoc accepts via pandoc)
+// inside filepath.Dir(entry). BFS is capped at MaxFiles. Outgoing
+// links between rendered files rewrite to file:// URLs so a
+// static-mode preview navigates without a server. Out-of-tree,
+// missing, over-cap, and symlink-escape links rewrite to a
+// javascript:mdpStaticToast(...) sentinel. Returns the entry's tmp
+// HTML path.
 func RenderStaticTree(entry, tmpDir string, opts StaticTreeOptions) (string, error) {
 	absEntry, err := filepath.Abs(entry)
 	if err != nil {
 		return "", err
 	}
-	rootDir := filepath.Dir(absEntry)
+	resolvedEntry, err := filepath.EvalSymlinks(absEntry)
+	if err != nil {
+		return "", err
+	}
+	rootDir, err := filepath.EvalSymlinks(filepath.Dir(absEntry))
+	if err != nil {
+		return "", err
+	}
 	maxFiles := opts.MaxFiles
 	if maxFiles <= 0 {
 		maxFiles = StaticTreeMaxFiles
 	}
 
-	// BFS through .md links inside rootDir. bodies[abs] holds the
-	// goldmark output for each rendered file before link rewriting.
+	// BFS through walkable links inside rootDir. bodies[resolved] holds
+	// the rendered output keyed on the symlink-resolved path so two
+	// hrefs aimed at the same physical file dedup correctly and a link
+	// target outside rootDir (via symlink) can't slip past confinement.
 	bodies := map[string]string{}
-	queue := []string{absEntry}
+	seen := map[string]bool{resolvedEntry: true}
+	queue := []string{resolvedEntry}
 	for len(queue) > 0 && len(bodies) < maxFiles {
 		cur := queue[0]
 		queue = queue[1:]
-		if _, seen := bodies[cur]; seen {
-			continue
-		}
 		body, err := RenderBody(cur)
 		if err != nil {
-			if cur == absEntry {
+			if cur == resolvedEntry {
 				return "", err
 			}
-			// Sub-files that fail to render get a small inline error
-			// rather than aborting the whole walk.
 			body = `<p>Error rendering ` + gohtml.EscapeString(cur) + `: ` + gohtml.EscapeString(err.Error()) + `</p>`
 		}
 		bodies[cur] = body
 		for _, href := range extractLinkHrefs(body) {
-			tgt := resolveHrefTarget(href, filepath.Dir(cur))
-			if tgt == "" {
+			resolved := resolveWalkTarget(href, filepath.Dir(cur), rootDir)
+			if resolved == "" || seen[resolved] {
 				continue
 			}
-			if !pathInsideDir(tgt, rootDir) {
-				continue
-			}
-			if !isWalkableExt(tgt) {
-				continue
-			}
-			if _, statErr := os.Stat(tgt); statErr != nil {
-				continue
-			}
-			queue = append(queue, filepath.Clean(tgt))
+			seen[resolved] = true
+			queue = append(queue, resolved)
 		}
 	}
 
-	// rendered maps abs source path → tmp HTML path. Built once so
-	// link rewriting in every body sees the same mapping.
 	rendered := make(map[string]string, len(bodies))
 	for src := range bodies {
 		rendered[src] = TmpHTMLPath(tmpDir, src)
@@ -112,17 +114,44 @@ func RenderStaticTree(entry, tmpDir string, opts StaticTreeOptions) (string, err
 	for src, body := range bodies {
 		rewritten := RewriteStaticLinks(body, src, rootDir, rendered)
 		rewritten = RewriteImgSrc(rewritten, filepath.Dir(src), func(abs string) (string, bool) {
-			if !pathInsideDir(abs, rootDir) {
+			resolved, err := filepath.EvalSymlinks(abs)
+			if err != nil || !pathInsideDir(resolved, rootDir) {
 				return "", false
 			}
-			return FileURL(abs), true
+			return FileURL(resolved), true
 		})
 		page := BuildPage(rewritten, opts.Theme, 0, opts.ExtraCSS, opts.Colemak, src)
 		if err := writeStaticTmpFile(rendered[src], []byte(page)); err != nil {
 			return "", err
 		}
 	}
-	return rendered[absEntry], nil
+	return rendered[resolvedEntry], nil
+}
+
+// resolveWalkTarget resolves href to a symlink-confined absolute path
+// suitable for BFS enqueue. Returns "" when href is an anchor, an
+// external scheme, an unwalkable extension, missing, or escapes
+// rootDir (either lexically or via symlink). rootDir must already be
+// symlink-resolved.
+func resolveWalkTarget(href, srcDir, rootDir string) string {
+	tgt := resolveHrefTarget(href, srcDir)
+	if tgt == "" {
+		return ""
+	}
+	if !pathInsideDir(tgt, rootDir) {
+		return ""
+	}
+	if !isWalkableExt(tgt) {
+		return ""
+	}
+	resolved, err := filepath.EvalSymlinks(tgt)
+	if err != nil {
+		return ""
+	}
+	if !pathInsideDir(resolved, rootDir) {
+		return ""
+	}
+	return resolved
 }
 
 // linkHrefRe matches `<a href="..."` in goldmark or pandoc HTML
@@ -161,14 +190,14 @@ func resolveHrefTarget(href, srcDir string) string {
 // RewriteStaticLinks rewrites every <a href> in body for static-mode
 // use:
 //   - Anchor and external-scheme hrefs pass through unchanged.
-//   - .md inside rootDir that we pre-rendered → file://<tmp html>.
-//   - .md inside rootDir but missing from rendered (over-cap or
-//     unreachable from entry) → toast sentinel.
-//   - Non-md renderable extensions → toast sentinel (need `mdp
-//     watch` to navigate).
-//   - Non-renderable, inside rootDir → file:// to the source file
+//   - Walkable extension inside rootDir that we pre-rendered →
+//     file://<tmp html>.
+//   - Walkable extension inside rootDir but missing from rendered
+//     (over-cap or unreachable from entry) → toast sentinel.
+//   - Non-walkable, inside rootDir → file:// to the source file
 //     (browser does whatever it does with images, PDFs, …).
-//   - Anything out of tree → toast sentinel.
+//   - Anything out of tree (lexically or after symlink resolution) →
+//     toast sentinel.
 //   - Missing files → toast sentinel.
 func RewriteStaticLinks(body, srcAbs, rootDir string, rendered map[string]string) string {
 	srcDir := filepath.Dir(srcAbs)
@@ -191,23 +220,31 @@ func rewriteOneStaticHref(href, srcDir, rootDir string, rendered map[string]stri
 	if !pathInsideDir(target, rootDir) {
 		return staticToastHref("out of tree: " + href)
 	}
-	info, statErr := os.Stat(target)
+	resolved, rerr := filepath.EvalSymlinks(target)
+	if rerr != nil {
+		return staticToastHref("file not found: " + href)
+	}
+	info, statErr := os.Stat(resolved)
 	if statErr != nil || info.IsDir() {
 		return staticToastHref("file not found: " + href)
 	}
-	if isWalkableExt(target) {
-		if tmp, ok := rendered[target]; ok {
+	// Re-check after symlink resolution: a sibling inside rootDir
+	// pointing at /etc/passwd would otherwise be served via file://.
+	if !pathInsideDir(resolved, rootDir) {
+		return staticToastHref("out of tree: " + href)
+	}
+	if isWalkableExt(resolved) {
+		if tmp, ok := rendered[resolved]; ok {
 			return "file://" + tmp
 		}
 		return staticToastHref("not pre-rendered (max files reached): " + href)
 	}
-	return "file://" + target
+	return "file://" + resolved
 }
 
 // isWalkableExt reports whether path's extension is one the static
-// walker pre-renders into its own tmp HTML: markdown (goldmark) plus
-// every pandoc input format. Other in-tree files fall through to a
-// raw file:// link.
+// walker pre-renders: markdown via goldmark, anything else via
+// pandoc. Other in-tree files fall through to a raw file:// link.
 func isWalkableExt(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".md", ".markdown":
