@@ -109,13 +109,11 @@ func Available() bool {
 	return availOK
 }
 
-// Open creates a GtkWindow + WebKitWebView pointed at opts.URL, then
-// blocks on gtk_main until the user closes the window.
 func Open(opts Options) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
-	// Faster JIT tier-up for the wasm cold path.
+	// Speeds up JSC JIT tier-up; noticeable on the wasm cold path.
 	_ = os.Setenv("JSC_jitPolicyScale", "0.1")
 
 	loadOnce.Do(func() { loadErr = dlopenAll() })

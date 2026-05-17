@@ -1,20 +1,15 @@
-// Package nativewin opens a native chromeless window pointed at a URL,
-// without spawning the user's browser. On linux it dlopens WebKitGTK via
-// purego (no CGO needed at compile time). On darwin it drives Cocoa
-// WKWebView via purego/objc (Objective-C runtime calls, also no CGO).
-// Unsupported platforms return ErrUnsupported and the caller should
-// fall back to spawning the user's browser.
-//
-// The implementation is split into per-OS files. nativewin_linux.go and
-// nativewin_darwin.go each define Open and Available; this file holds the
-// shared Options struct, the sentinel error, and package-level docs.
+// Package nativewin opens a chromeless OS window at a URL without
+// spawning the user's browser. Linux dlopens WebKitGTK via purego;
+// darwin drives WKWebView via purego/objc. Both keep CGO disabled.
+// Unsupported platforms return ErrUnsupported so the caller can fall
+// back to a browser spawn.
 package nativewin
 
 import "errors"
 
-// ErrUnsupported is returned by Open when the current platform has no
-// native-window backend wired up, or when the required runtime libraries
-// are missing (e.g. libwebkit2gtk-4.1 not installed on Linux).
+// ErrUnsupported signals that no backend is available, either because
+// the OS isn't supported or because the runtime libs (e.g.
+// libwebkit2gtk-4.1) aren't installed.
 var ErrUnsupported = errors.New("nativewin: unsupported platform or missing runtime libraries")
 
 // Options configures the native window. Width/Height of 0 use the
