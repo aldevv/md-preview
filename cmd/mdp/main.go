@@ -83,9 +83,8 @@ func realEnv() Environment {
 	}
 }
 
-// openNativeWindow is the production wiring for Environment.OpenWindow.
-// Probes Available() lazily (the Linux probe dlopens libgtk/libwebkit),
-// so users who never opt into the native path don't pay for it.
+// Probes Available() lazily; the Linux probe dlopens libgtk/libwebkit,
+// so users who never opt into the native path don't pay that cost.
 func openNativeWindow(url string) error {
 	if !nativewin.Available() {
 		return nativewin.ErrUnsupported
@@ -257,18 +256,15 @@ func parseRunFlags(args []string, stdout, stderr io.Writer) (flags runFlags, exi
 	return flags, 0, false
 }
 
-// resolved bundles the validated context shared by `mdp <file>` and
-// `mdp watch <file>`: abs source path, normalized theme, loaded config.
 type resolved struct {
 	src   string
 	theme string
 	cfg   config.Config
 }
 
-// resolveAndValidate handles file pick + abs/stat + theme defaulting +
-// pandoc ensure for both `mdp <file>` and `mdp watch <file>`. onFzfMissing
-// is invoked when no positional was given and fzf is unavailable; its
-// return value is the exit code surfaced to the caller.
+// onFzfMissing fires when no positional was given and fzf is unavailable;
+// its return value becomes the exit code. run() shows usage and exits 0,
+// watch surfaces an error and exits 1.
 func resolveAndValidate(positional, themeFlag string, env Environment, stderr io.Writer, onFzfMissing func() int) (rc resolved, exitCode int, done bool) {
 	cfg, err := env.LoadConfig()
 	if err != nil {
@@ -390,8 +386,7 @@ func maybeOpenEditor(src string, env Environment, stderr io.Writer) int {
 	return 0
 }
 
-// tmpHTMLPath returns a stable path so re-runs on the same source
-// overwrite rather than accumulate.
+// Stable per-source path so re-runs overwrite rather than accumulate.
 func tmpHTMLPath(tmpdir, src string) string {
 	sum := sha1.Sum([]byte(src))
 	digest := hex.EncodeToString(sum[:])[:12]
@@ -425,12 +420,9 @@ func pruneStaleTmpFiles(tmpdir string, stderr io.Writer) {
 	}
 }
 
-// writeTmpFile writes data to path with mode 0600 and refuses to follow
-// symlinks at the path. The stable filename in a shared /tmp is otherwise
-// vulnerable to a foreign-user-planted symlink redirecting our truncate to
-// e.g. ~/.bashrc; O_NOFOLLOW makes the open fail with ELOOP in that case.
-// O_TRUNC is set so re-runs on the same source overwrite cleanly. Shared
-// by `mdp <file>` (HTML preview) and `mdp skill path` (extracted reference).
+// O_NOFOLLOW: the stable filename in a shared /tmp is otherwise vulnerable
+// to a foreign-user-planted symlink redirecting our truncate to e.g.
+// ~/.bashrc; ELOOP makes the open fail cleanly in that case.
 func writeTmpFile(path string, data []byte) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
@@ -441,14 +433,11 @@ func writeTmpFile(path string, data []byte) error {
 	return err
 }
 
-// version is set at link time via `-ldflags "-X main.version=..."` for
-// release builds (goreleaser) and `make install`. For module-mode
-// `go install github.com/aldevv/md-preview/cmd/mdp@vX.Y.Z` invocations
-// it stays empty and buildVersion falls back to debug.ReadBuildInfo.
+// Injected via `-ldflags -X main.version=...` for release builds and
+// `make install`. Empty for module-mode `go install`, in which case
+// buildVersion falls back to debug.ReadBuildInfo.
 var version string
 
-// install.sh reads this to skip no-op reinstalls. Update also compares
-// it against the latest release tag.
 func buildVersion() string {
 	if version != "" {
 		return version
@@ -460,8 +449,7 @@ func buildVersion() string {
 	return info.Main.Version
 }
 
-// spawnDetached starts argv in its own session so closing the terminal does
-// not kill the browser. Output is discarded.
+// Setsid so closing the terminal doesn't kill the browser child.
 func spawnDetached(argv []string) error {
 	if len(argv) == 0 {
 		return fmt.Errorf("empty browser command")
@@ -521,16 +509,11 @@ func runWatchSubcommand(args []string, stdout, stderr io.Writer, env Environment
 	return runWatchWithBrowser(opts, rc.cfg, env, stderr)
 }
 
-// envFlagOn returns true for "1" or "true" so MDP_NATIVE matches the
-// shape of MDP_COLEMAK (see runServe).
 func envFlagOn(name string) bool {
 	v := os.Getenv(name)
 	return v == "1" || v == "true"
 }
 
-// runWatchWithBrowser is the default path: the server blocks the main
-// goroutine, and OnListen asynchronously spawns the user's browser.
-// Behavior matches mdp pre-native-window.
 func runWatchWithBrowser(opts server.Options, cfg config.Config, env Environment, stderr io.Writer) int {
 	opts.OnListen = func(port int) {
 		url := fmt.Sprintf("http://localhost:%d/", port)
@@ -546,13 +529,9 @@ func runWatchWithBrowser(opts server.Options, cfg config.Config, env Environment
 	return 0
 }
 
-// runWatchWithNativeWindow is the MDP_NATIVE=1 path: the server runs in
-// a goroutine, the native window blocks the main goroutine, and we fall
-// back to spawning the user's browser if the native path is unavailable.
-//
 // Cocoa requires the NSApp run loop on the OS main thread; main_darwin.go
-// locks the main goroutine for that reason. GTK is more forgiving but
-// nativewin.Open also locks for hygiene.
+// locks the main goroutine for that reason, so the native window must
+// block here while the server runs in a goroutine.
 func runWatchWithNativeWindow(opts server.Options, cfg config.Config, env Environment, stderr io.Writer) int {
 	listenCh := make(chan int, 1)
 	opts.OnListen = func(port int) { listenCh <- port }
@@ -596,10 +575,7 @@ func runWatchWithNativeWindow(opts server.Options, cfg config.Config, env Enviro
 	}
 }
 
-// runServe handles `mdp serve <file> <port> <theme>`. The Lua plugin spawns
-// this and communicates over JSON-on-stdin; see internal/server. Colemak
-// nav-key mode is opted in via MDP_COLEMAK=1 in the environment, with
-// config.toml `colemak = true` as a fallback default.
+// MDP_COLEMAK=1 in the environment overrides config.toml's colemak flag.
 func runServe(args []string, stderr io.Writer) int {
 	if len(args) < 3 {
 		fmt.Fprintln(stderr, "Usage: mdp serve <file> <port> <theme>")
