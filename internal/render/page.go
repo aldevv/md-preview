@@ -355,6 +355,15 @@ function mdpStaticToast(encoded) {
   mdpShowToast(decodeURIComponent(encoded));
 }
 window.mdpStaticToast = mdpStaticToast;
+document.addEventListener('click', (e) => {
+  const a = e.target.closest('a');
+  if (!a) return;
+  const href = a.getAttribute('href');
+  if (!href) return;
+  if (!/^(https?|mailto|tel|ftp|ftps):/i.test(href)) return;
+  e.preventDefault();
+  window.open(href, '_blank', 'noopener,noreferrer');
+});
 %s
 hljs.highlightAll();
 %s
