@@ -116,9 +116,11 @@ func (s *state) removeClient(c net.Conn) {
 	s.mu.Unlock()
 }
 
-// broadcast applies a per-client write deadline so one paused tab cannot
-// stall scroll-sync for everyone behind it; failed/timed-out clients are
-// dropped from the registry.
+// broadcast fans writes out per-client so one stalled tab only blocks its
+// own goroutine for wsWriteTimeout; the rest still see the frame within
+// a few ms. Returns after every write attempt finishes so callers that
+// expect ordering across successive broadcasts (e.g. scroll then reload)
+// keep that ordering.
 func (s *state) broadcast(msg string) {
 	frame := wsEncode(msg)
 	s.mu.Lock()
@@ -128,12 +130,28 @@ func (s *state) broadcast(msg string) {
 	}
 	s.mu.Unlock()
 
-	var dead []net.Conn
+	if len(clients) == 0 {
+		return
+	}
+
+	deadCh := make(chan net.Conn, len(clients))
+	var wg sync.WaitGroup
 	for _, c := range clients {
-		_ = c.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
-		if _, err := c.Write(frame); err != nil {
-			dead = append(dead, c)
-		}
+		wg.Add(1)
+		go func(c net.Conn) {
+			defer wg.Done()
+			_ = c.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
+			if _, err := c.Write(frame); err != nil {
+				deadCh <- c
+			}
+		}(c)
+	}
+	wg.Wait()
+	close(deadCh)
+
+	var dead []net.Conn
+	for c := range deadCh {
+		dead = append(dead, c)
 	}
 	if len(dead) > 0 {
 		s.mu.Lock()

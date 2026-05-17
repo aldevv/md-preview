@@ -3,8 +3,10 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -873,5 +875,115 @@ func TestStdin_QuitCommand(t *testing.T) {
 	defer mu.Unlock()
 	if !called {
 		t.Errorf("quit callback not invoked")
+	}
+}
+
+type fakeConn struct {
+	writeStarted chan struct{}
+	writeDone    chan struct{}
+	deadline     time.Time
+	slow         bool
+	closed       bool
+	mu           sync.Mutex
+}
+
+func newFastConn() *fakeConn {
+	return &fakeConn{writeStarted: make(chan struct{}, 1), writeDone: make(chan struct{}, 1)}
+}
+
+func newSlowConn() *fakeConn {
+	return &fakeConn{writeStarted: make(chan struct{}, 1), writeDone: make(chan struct{}, 1), slow: true}
+}
+
+func (f *fakeConn) Read(b []byte) (int, error) { return 0, io.EOF }
+
+func (f *fakeConn) Write(b []byte) (int, error) {
+	select {
+	case f.writeStarted <- struct{}{}:
+	default:
+	}
+	if !f.slow {
+		f.writeDone <- struct{}{}
+		return len(b), nil
+	}
+	f.mu.Lock()
+	deadline := f.deadline
+	f.mu.Unlock()
+	if !deadline.IsZero() {
+		d := time.Until(deadline)
+		if d <= 0 {
+			return 0, errors.New("write deadline exceeded")
+		}
+		time.Sleep(d)
+		return 0, errors.New("write deadline exceeded")
+	}
+	select {}
+}
+
+func (f *fakeConn) Close() error {
+	f.mu.Lock()
+	f.closed = true
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeConn) isClosed() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.closed
+}
+
+func (f *fakeConn) LocalAddr() net.Addr                { return &net.TCPAddr{} }
+func (f *fakeConn) RemoteAddr() net.Addr               { return &net.TCPAddr{} }
+func (f *fakeConn) SetDeadline(t time.Time) error      { return f.SetWriteDeadline(t) }
+func (f *fakeConn) SetReadDeadline(_ time.Time) error  { return nil }
+func (f *fakeConn) SetWriteDeadline(t time.Time) error {
+	f.mu.Lock()
+	f.deadline = t
+	f.mu.Unlock()
+	return nil
+}
+
+func TestBroadcast_FanOut_SlowClientDoesNotStallOthers(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	s := newTestState(t, file)
+	s.eventLog = io.Discard
+
+	fast := newFastConn()
+	slow := newSlowConn()
+	s.addClient(fast)
+	s.addClient(slow)
+
+	done := make(chan struct{})
+	go func() {
+		s.broadcast("hello")
+		close(done)
+	}()
+
+	select {
+	case <-fast.writeDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("fast client did not receive within 500ms; slow client stalled fan-out")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(wsWriteTimeout + 500*time.Millisecond):
+		t.Fatalf("broadcast did not return after slow client's deadline")
+	}
+
+	s.mu.Lock()
+	_, slowStillRegistered := s.wsClients[slow]
+	_, fastStillRegistered := s.wsClients[fast]
+	s.mu.Unlock()
+	if slowStillRegistered {
+		t.Errorf("slow client was not evicted after write timeout")
+	}
+	if !fastStillRegistered {
+		t.Errorf("fast client was evicted; should have stayed registered")
+	}
+	if !slow.isClosed() {
+		t.Errorf("slow client conn was not closed on eviction")
 	}
 }
