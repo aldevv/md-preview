@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aldevv/md-preview/internal/config"
 	"github.com/aldevv/md-preview/internal/render"
@@ -367,6 +368,35 @@ func TestRun_ServeSubcommand_InvalidPort(t *testing.T) {
 	}
 	if !strings.Contains(errb.String(), "invalid port") {
 		t.Fatalf("stderr = %q, want invalid port", errb.String())
+	}
+}
+
+func TestPruneStaleTmpFiles(t *testing.T) {
+	tmpdir := t.TempDir()
+	stale := filepath.Join(tmpdir, "mdp-staleabc.html")
+	fresh := filepath.Join(tmpdir, "mdp-freshxyz.html")
+	other := filepath.Join(tmpdir, "not-an-mdp-file.html")
+	for _, p := range []string{stale, fresh, other} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-30 * 24 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	var errb bytes.Buffer
+	pruneStaleTmpFiles(tmpdir, &errb)
+
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("stale file still exists: %v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("fresh file should be preserved: %v", err)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Errorf("non-mdp file should be preserved: %v", err)
 	}
 }
 

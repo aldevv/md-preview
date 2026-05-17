@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/aldevv/md-preview/internal/config"
 	"github.com/aldevv/md-preview/internal/nativewin"
@@ -150,6 +151,8 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 			return 0
 		}
 	}
+
+	pruneStaleTmpFiles(env.TempDir(), stderr)
 
 	flags, code, done := parseRunFlags(args, stdout, stderr)
 	if done {
@@ -393,6 +396,33 @@ func tmpHTMLPath(tmpdir, src string) string {
 	sum := sha1.Sum([]byte(src))
 	digest := hex.EncodeToString(sum[:])[:12]
 	return filepath.Join(tmpdir, "mdp-"+digest+".html")
+}
+
+const tmpFileTTL = 7 * 24 * time.Hour
+
+// pruneStaleTmpFiles removes mdp-*.html entries in tmpdir whose mtime is
+// older than tmpFileTTL. Failures are non-fatal (best-effort GC); a
+// single warning on read goes to stderr so a wedged tmpdir is visible.
+func pruneStaleTmpFiles(tmpdir string, stderr io.Writer) {
+	entries, err := os.ReadDir(tmpdir)
+	if err != nil {
+		fmt.Fprintf(stderr, "mdp: pruning %s: %v\n", tmpdir, err)
+		return
+	}
+	cutoff := time.Now().Add(-tmpFileTTL)
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, "mdp-") || !strings.HasSuffix(name, ".html") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			_ = os.Remove(filepath.Join(tmpdir, name))
+		}
+	}
 }
 
 // writeTmpFile writes data to path with mode 0600 and refuses to follow
