@@ -222,8 +222,10 @@ __EXTRA_CSS__
 </style>
 </head>
 <body>
+<div id="mdp-nav-bar" hidden>
 <button id="mdp-back" class="mdp-nav-btn" aria-label="Back" title="Back" hidden>&#8249;</button>
 <button id="mdp-fwd" class="mdp-nav-btn" aria-label="Forward" title="Forward" hidden>&#8250;</button>
+</div>
 <div id="content" class="markdown-body">
 __BODY__
 </div>
@@ -237,23 +239,34 @@ window.mdpCurrentFile = __CURRENT_FILE_JS__;
 // reloads but stays consistent with the same data.
 let mdpStack = JSON.parse(sessionStorage.getItem('mdpStack') || '[]');
 let mdpIdx = parseInt(sessionStorage.getItem('mdpIdx') || '-1', 10);
+let mdpURLs = JSON.parse(sessionStorage.getItem('mdpURLs') || '[]');
+// Backfill (or trim) URLs to match the path stack so per-index lookups stay aligned.
+while (mdpURLs.length < mdpStack.length) mdpURLs.push('');
+mdpURLs.length = mdpStack.length;
 const mdpBackBtn = document.getElementById('mdp-back');
 const mdpFwdBtn = document.getElementById('mdp-fwd');
 function mdpSaveNav() {
   sessionStorage.setItem('mdpStack', JSON.stringify(mdpStack));
   sessionStorage.setItem('mdpIdx', String(mdpIdx));
+  sessionStorage.setItem('mdpURLs', JSON.stringify(mdpURLs));
   mdpUpdateNavButtons();
 }
 function mdpUpdateNavButtons() {
-  if (mdpBackBtn) mdpBackBtn.hidden = mdpIdx <= 0;
-  if (mdpFwdBtn)  mdpFwdBtn.hidden  = mdpIdx >= mdpStack.length - 1;
+  const canBack = mdpIdx > 0;
+  const canFwd  = mdpIdx >= 0 && mdpIdx < mdpStack.length - 1;
+  if (mdpBackBtn) mdpBackBtn.hidden = !canBack;
+  if (mdpFwdBtn)  mdpFwdBtn.hidden  = !canFwd;
+  const bar = document.getElementById('mdp-nav-bar');
+  if (bar) bar.hidden = !canBack && !canFwd;
 }
 function mdpNavigatedTo(target) {
   // A new navigation (not back/forward): discard forward history,
   // append, advance idx.
   if (mdpIdx >= 0 && mdpStack[mdpIdx] === target) return;
   mdpStack = mdpStack.slice(0, mdpIdx + 1);
+  mdpURLs = mdpURLs.slice(0, mdpIdx + 1);
   mdpStack.push(target);
+  mdpURLs.push(window.location.href);
   mdpIdx = mdpStack.length - 1;
   mdpSaveNav();
 }
@@ -261,6 +274,7 @@ function mdpNavigatedTo(target) {
 // back/forward navigations between separate file:// pages).
 (function () {
   const cur = window.mdpCurrentFile;
+  const curURL = window.location.href;
   if (!cur) return;
   if (mdpIdx >= 0 && mdpStack[mdpIdx] === cur) {
   } else if (mdpIdx >= 1 && mdpStack[mdpIdx - 1] === cur) {
@@ -269,13 +283,38 @@ function mdpNavigatedTo(target) {
     mdpIdx++;
   } else {
     mdpStack = mdpStack.slice(0, mdpIdx + 1);
+    mdpURLs = mdpURLs.slice(0, mdpIdx + 1);
     mdpStack.push(cur);
+    mdpURLs.push(curURL);
     mdpIdx = mdpStack.length - 1;
   }
+  // Refresh URL at current idx; back-restored pages may land at a
+  // slightly-different URL (query string, hash, normalization).
+  if (mdpIdx >= 0) mdpURLs[mdpIdx] = curURL;
   mdpSaveNav();
 })();
-if (mdpBackBtn) mdpBackBtn.addEventListener('click', () => window.history.back());
-if (mdpFwdBtn)  mdpFwdBtn.addEventListener('click',  () => window.history.forward());
+// In static mode (file://) navigate via stored URLs so we don't
+// depend on window.history.forward(), which is unreliable for
+// cross-file:// nav in chrome --app= popups.
+const mdpUseURLNav = window.location.protocol === 'file:';
+function mdpGoBack() {
+  if (mdpIdx <= 0) return;
+  if (mdpUseURLNav && mdpURLs[mdpIdx - 1]) {
+    window.location.href = mdpURLs[mdpIdx - 1];
+  } else {
+    window.history.back();
+  }
+}
+function mdpGoForward() {
+  if (mdpIdx >= mdpStack.length - 1) return;
+  if (mdpUseURLNav && mdpURLs[mdpIdx + 1]) {
+    window.location.href = mdpURLs[mdpIdx + 1];
+  } else {
+    window.history.forward();
+  }
+}
+if (mdpBackBtn) mdpBackBtn.addEventListener('click', mdpGoBack);
+if (mdpFwdBtn)  mdpFwdBtn.addEventListener('click', mdpGoForward);
 function mdpShowToast(msg) {
   const el = document.getElementById('mdp-toast');
   if (!el) return;

@@ -24,10 +24,29 @@
   transform: translateY(0);
 }
 
-.mdp-nav-btn {
+#mdp-nav-bar {
   position: fixed;
-  top: 16px;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 56px;
   z-index: 9998;
+  background: var(--color-bg-primary);
+  display: flex;
+  align-items: center;
+  padding: 8px 16px;
+  gap: 4px;
+}
+
+#mdp-nav-bar[hidden] {
+  display: none;
+}
+
+body:has(#mdp-nav-bar:not([hidden])) {
+  padding-top: 56px;
+}
+
+.mdp-nav-btn {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -54,5 +73,6 @@
   outline-offset: 2px;
   opacity: 1;
 }
-#mdp-back { left: 16px; }
-#mdp-fwd  { left: 64px; }
+.mdp-nav-btn[hidden] {
+  display: none;
+}
