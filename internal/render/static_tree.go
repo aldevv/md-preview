@@ -18,39 +18,29 @@ import (
 	"github.com/aldevv/md-preview/internal/render/pandoc"
 )
 
-// StaticTreeMaxFiles caps the BFS so a pathological linkfarm can't
-// run the renderer hundreds of times during a single `mdp foo.md`.
-// Over-cap links rewrite to a toast-sentinel so the user still gets
-// a clean message instead of a broken navigation.
+// StaticTreeMaxFiles caps the BFS so a pathological linkfarm can't run
+// the renderer hundreds of times during a single `mdp foo.md`.
 const StaticTreeMaxFiles = 200
 
-// StaticTreePandocBudget caps how many pandoc-renderable files the
-// BFS walks. Pandoc renders are ~100-1000x more expensive than
-// goldmark, so the total-files cap (StaticTreeMaxFiles) alone lets a
-// .tex-heavy tree blow the wall-clock budget. Counted independently
-// of StaticTreeMaxFiles: a tree can fill both caps simultaneously.
+// StaticTreePandocBudget caps how many pandoc-renderable files the BFS
+// walks. Pandoc renders are ~100-1000x more expensive than goldmark, so
+// the total-files cap (StaticTreeMaxFiles) alone lets a .tex-heavy tree
+// blow the wall-clock budget. Counted independently of StaticTreeMaxFiles.
 const StaticTreePandocBudget = 25
 
-// StaticTreeOptions configures RenderStaticTree. Mirrors the subset
-// of BuildPage args the entry and its siblings need.
 type StaticTreeOptions struct {
 	Theme    string
 	ExtraCSS string
 	Colemak  bool
-	// MaxFiles overrides StaticTreeMaxFiles when nonzero. Tests use
-	// this to exercise the cap path without authoring 200 fixtures.
+	// MaxFiles overrides StaticTreeMaxFiles when nonzero.
 	MaxFiles int
 	// PandocBudget overrides StaticTreePandocBudget when nonzero.
 	PandocBudget int
 }
 
-// TmpHTMLPath returns the stable per-source tmp HTML file used by
-// the static link-graph walker. sha1 of the symlink-resolved abs
-// source path keeps two callers of the same physical file from
-// computing different tmp filenames (e.g. macOS /var/folders vs
-// /private/var/folders, or a sibling symlink to the same target).
-// Falls back to filepath.Abs when EvalSymlinks fails so callers can
-// still derive a path before the file exists.
+// TmpHTMLPath returns the stable per-source tmp HTML file used by the
+// static link-graph walker. EvalSymlinks dedups two hrefs at the same
+// physical file (e.g. /var/folders vs /private/var/folders on macOS).
 func TmpHTMLPath(tmpDir, source string) string {
 	resolved, err := filepath.EvalSymlinks(source)
 	if err != nil {
@@ -64,15 +54,10 @@ func TmpHTMLPath(tmpDir, source string) string {
 	return filepath.Join(tmpDir, "mdp-"+hex.EncodeToString(sum[:])[:12]+".html")
 }
 
-// RenderStaticTree pre-renders entry plus every reachable walkable
-// file (markdown via goldmark, anything pandoc accepts via pandoc)
-// inside filepath.Dir(entry). BFS is capped at MaxFiles and renders
-// each wave's batch in parallel across runtime.NumCPU() workers.
-// Outgoing links between rendered files rewrite to file:// URLs so a
-// static-mode preview navigates without a server. Out-of-tree,
-// missing, over-cap, and symlink-escape links rewrite to a
-// javascript:mdpStaticToast(...) sentinel. Returns the entry's tmp
-// HTML path.
+// RenderStaticTree pre-renders entry plus every walkable link inside
+// filepath.Dir(entry), capped at MaxFiles. Each BFS wave renders in
+// parallel; refused links (out-of-tree, missing, over-cap,
+// symlink-escape) rewrite to a javascript:mdpStaticToast() sentinel.
 func RenderStaticTree(entry, tmpDir string, opts StaticTreeOptions) (string, error) {
 	absEntry, err := filepath.Abs(entry)
 	if err != nil {
@@ -95,13 +80,10 @@ func RenderStaticTree(entry, tmpDir string, opts StaticTreeOptions) (string, err
 		pandocBudget = StaticTreePandocBudget
 	}
 
-	// Wave-parallel BFS through walkable links inside rootDir.
-	// bodies[resolved] holds the rendered output keyed on the
-	// symlink-resolved path so two hrefs aimed at the same physical
-	// file dedup correctly and a link target outside rootDir (via
-	// symlink) can't slip past confinement. Each wave renders its
-	// batch in parallel (pandoc subprocesses are the bottleneck);
-	// hrefs discovered across the wave feed the next.
+	// bodies is keyed on the symlink-resolved path so two hrefs at the
+	// same physical file dedup and an out-of-tree symlink target can't
+	// slip past confinement. Each wave renders in parallel; discovered
+	// hrefs feed the next.
 	bodies := map[string]string{}
 	seen := map[string]bool{resolvedEntry: true}
 	queue := []string{resolvedEntry}
@@ -166,10 +148,8 @@ type renderResult struct {
 	err  error
 }
 
-// renderBatch fans the paths out across a bounded pool of workers and
-// blocks until every render finishes. A failure on resolvedEntry
-// aborts the whole walk; failures on sub-files fall through to an
-// inline error body so one bad link doesn't take down the tree.
+// A failure on resolvedEntry aborts the whole walk; failures on
+// sub-files fall through to an inline error body.
 func renderBatch(paths []string, resolvedEntry string) ([]renderResult, error) {
 	if len(paths) == 0 {
 		return nil, nil
@@ -208,10 +188,8 @@ func renderBatch(paths []string, resolvedEntry string) ([]renderResult, error) {
 	return out, nil
 }
 
-// pandocParallelism returns the worker count for a renderBatch of
-// jobCount jobs. MDP_PANDOC_PARALLELISM, when a positive integer,
-// overrides the default cap; non-positive or unparseable values fall
-// back. Result is clamped to [1, jobCount].
+// MDP_PANDOC_PARALLELISM (positive int) overrides the default min(NumCPU, 8)
+// cap. Result is clamped to [1, jobCount].
 func pandocParallelism(jobCount int) int {
 	if jobCount <= 0 {
 		return 0
@@ -234,11 +212,7 @@ func pandocParallelism(jobCount int) int {
 	return workers
 }
 
-// resolveWalkTarget resolves href to a symlink-confined absolute path
-// suitable for BFS enqueue. Returns "" when href is an anchor, an
-// external scheme, an unwalkable extension, missing, or escapes
-// rootDir (either lexically or via symlink). rootDir must already be
-// symlink-resolved.
+// rootDir must already be symlink-resolved.
 func resolveWalkTarget(href, srcDir, rootDir string) string {
 	tgt := resolveHrefTarget(href, srcDir)
 	if tgt == "" {
@@ -265,13 +239,8 @@ func resolveWalkTarget(href, srcDir, rootDir string) string {
 // so we don't bother with single-quoted or unquoted forms.
 var linkHrefRe = regexp.MustCompile(`(<a\b[^>]*?\shref=)"([^"]*)"`)
 
-// schemeRe matches an absolute-URI scheme prefix (`http:`, `mailto:`,
-// `javascript:`, etc.) so the rewriter can let the browser handle
-// those clicks instead of intercepting.
 var schemeRe = regexp.MustCompile(`^[a-z][a-z0-9+.-]*:`)
 
-// extractLinkHrefs returns every href= value from the rendered body
-// for BFS queue purposes. Hrefs are returned as-is (un-resolved).
 func extractLinkHrefs(body string) []string {
 	matches := linkHrefRe.FindAllStringSubmatch(body, -1)
 	out := make([]string, 0, len(matches))
@@ -281,8 +250,6 @@ func extractLinkHrefs(body string) []string {
 	return out
 }
 
-// resolveHrefTarget resolves href against srcDir if relative; returns
-// "" for hrefs the static walker should ignore (anchors, schemes).
 func resolveHrefTarget(href, srcDir string) string {
 	if href == "" || strings.HasPrefix(href, "#") || schemeRe.MatchString(href) {
 		return ""
@@ -348,9 +315,6 @@ func rewriteOneStaticHref(href, srcDir, rootDir string, rendered map[string]stri
 	return "file://" + resolved
 }
 
-// IsWalkableExt reports whether path's extension is one the static
-// walker pre-renders: markdown via goldmark, anything else via
-// pandoc. Other in-tree files fall through to a raw file:// link.
 func IsWalkableExt(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".md", ".markdown":
@@ -359,18 +323,15 @@ func IsWalkableExt(path string) bool {
 	return pandoc.InputFormat(path) != ""
 }
 
-// staticToastHref encodes msg as a URI-component string and wraps it
-// in a javascript: URL that calls mdpStaticToast (declared in the
-// page template). url.QueryEscape produces pure ASCII so the result
-// is safe inside an HTML attribute value (no further escaping needed
-// at the JS layer, single-quoted, no quote in the encoded form).
+// staticToastHref wraps msg in javascript:mdpStaticToast(...);
+// url.QueryEscape produces pure ASCII so the result is safe inside the
+// single-quoted JS string and the surrounding HTML attribute.
 func staticToastHref(msg string) string {
 	return fmt.Sprintf("javascript:mdpStaticToast('%s')", url.QueryEscape(msg))
 }
 
 // pathInsideDir reports whether cleanPath is rooted at dir. Both
-// arguments must be absolute and clean. Local copy of the same-named
-// helper in internal/server so the render package stays independent.
+// arguments must be absolute and clean.
 func pathInsideDir(cleanPath, dir string) bool {
 	rel, err := filepath.Rel(dir, cleanPath)
 	if err != nil {
@@ -379,10 +340,8 @@ func pathInsideDir(cleanPath, dir string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
-// writeStaticTmpFile mirrors the o_NOFOLLOW write in cmd/mdp/main.go
-// so a shared-tmp symlink attack can't aim a write at a foreign
-// file. The render package can't import cmd/mdp, so it has its own
-// copy.
+// O_NOFOLLOW defends against a shared-tmp symlink attack aiming our
+// write at a foreign file.
 func writeStaticTmpFile(path string, data []byte) error {
 	flags := os.O_WRONLY | os.O_CREATE | os.O_TRUNC | syscall.O_NOFOLLOW
 	f, err := os.OpenFile(path, flags, 0o600)
