@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/aldevv/md-preview/internal/render/pandoc"
 )
 
 // writeMD writes a markdown file under dir and returns its absolute
@@ -136,11 +138,15 @@ func TestRenderStaticTree_MissingFileBecomesToast(t *testing.T) {
 	}
 }
 
-func TestRenderStaticTree_NonMdRenderableBecomesToast(t *testing.T) {
+func TestRenderStaticTree_FollowsPandocLinks(t *testing.T) {
+	if !pandoc.Available() {
+		t.Skip("pandoc not on PATH")
+	}
 	root := t.TempDir()
 	tmp := t.TempDir()
 	a := writeMD(t, root, "a.md", "# A\n[paper](paper.tex)\n")
-	if err := os.WriteFile(filepath.Join(root, "paper.tex"), []byte(`\section{X}`), 0o600); err != nil {
+	paper := filepath.Join(root, "paper.tex")
+	if err := os.WriteFile(paper, []byte(`\section{X}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -149,8 +155,12 @@ func TestRenderStaticTree_NonMdRenderableBecomesToast(t *testing.T) {
 		t.Fatalf("RenderStaticTree: %v", err)
 	}
 	body, _ := os.ReadFile(entry)
-	if !strings.Contains(string(body), url.QueryEscape("not available in static mode")) {
-		t.Errorf("non-md href should toast 'not available in static mode': %s", body)
+	wantHref := "file://" + TmpHTMLPath(tmp, paper)
+	if !strings.Contains(string(body), wantHref) {
+		t.Errorf("entry HTML missing pandoc-link rewrite to %s, body=%s", wantHref, body)
+	}
+	if _, err := os.Stat(TmpHTMLPath(tmp, paper)); err != nil {
+		t.Errorf("paper.tex should have been pre-rendered to %s: %v", TmpHTMLPath(tmp, paper), err)
 	}
 }
 

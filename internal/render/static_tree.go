@@ -92,8 +92,7 @@ func RenderStaticTree(entry, tmpDir string, opts StaticTreeOptions) (string, err
 			if !pathInsideDir(tgt, rootDir) {
 				continue
 			}
-			ext := strings.ToLower(filepath.Ext(tgt))
-			if ext != ".md" && ext != ".markdown" {
+			if !isWalkableExt(tgt) {
 				continue
 			}
 			if _, statErr := os.Stat(tgt); statErr != nil {
@@ -196,17 +195,25 @@ func rewriteOneStaticHref(href, srcDir, rootDir string, rendered map[string]stri
 	if statErr != nil || info.IsDir() {
 		return staticToastHref("file not found: " + href)
 	}
-	ext := strings.ToLower(filepath.Ext(target))
-	if ext == ".md" || ext == ".markdown" {
+	if isWalkableExt(target) {
 		if tmp, ok := rendered[target]; ok {
 			return "file://" + tmp
 		}
 		return staticToastHref("not pre-rendered (max files reached): " + href)
 	}
-	if pandoc.InputFormat(target) != "" {
-		return staticToastHref("not available in static mode (run 'mdp watch'): " + href)
-	}
 	return "file://" + target
+}
+
+// isWalkableExt reports whether path's extension is one the static
+// walker pre-renders into its own tmp HTML: markdown (goldmark) plus
+// every pandoc input format. Other in-tree files fall through to a
+// raw file:// link.
+func isWalkableExt(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".md", ".markdown":
+		return true
+	}
+	return pandoc.InputFormat(path) != ""
 }
 
 // staticToastHref encodes msg as a URI-component string and wraps it

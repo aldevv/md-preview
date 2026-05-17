@@ -267,12 +267,11 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 		}
 	}
 
-	// .md entries get the link-graph walker so cross-file clicks work
-	// in static mode. Other extensions render single-file: non-md
-	// docs rarely link to siblings, and a pandoc subprocess per
-	// linked .docx would balloon launch time.
+	// .md and pandoc-renderable entries get the link-graph walker so
+	// cross-file clicks work in static mode. The BFS is capped at
+	// StaticTreeMaxFiles so a heavy linker can't run pandoc 1000 times.
 	var tmpPath string
-	if isMarkdownPath(src) {
+	if isStaticWalkable(src) {
 		opts := render.StaticTreeOptions{
 			Theme:    theme,
 			ExtraCSS: config.ExtraCSS(cfg, stderr),
@@ -340,16 +339,15 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 	return 0
 }
 
-// isMarkdownPath reports whether src has a markdown extension that
-// the goldmark renderer (rather than pandoc) handles. Used by run()
-// to gate the static link-graph walker, which only follows .md
-// links.
-func isMarkdownPath(src string) bool {
+// isStaticWalkable reports whether src's extension is one the static
+// link-graph walker can pre-render: markdown via goldmark, anything
+// else via pandoc.
+func isStaticWalkable(src string) bool {
 	switch strings.ToLower(filepath.Ext(src)) {
 	case ".md", ".markdown":
 		return true
 	}
-	return false
+	return pandoc.InputFormat(src) != ""
 }
 
 // tmpHTMLPath returns a stable path so re-runs on the same source
