@@ -128,7 +128,6 @@ Subcommands:
 `
 
 func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) int {
-	// EnsureDefault is idempotent; failure is non-fatal (mdp works without a config).
 	if err := config.EnsureDefault(); err != nil {
 		fmt.Fprintf(stderr, "mdp: seeding default config: %v\n", err)
 	}
@@ -152,6 +151,62 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 		}
 	}
 
+	flags, code, done := parseRunFlags(args, stdout, stderr)
+	if done {
+		return code
+	}
+
+	rc, code, done := resolveAndValidate(flags.positional, flags.theme, env, stderr, func() int {
+		fmt.Fprint(stdout, usage)
+		return 0
+	})
+	if done {
+		return code
+	}
+
+	tmpPath, ok := renderEntry(rc, env, stderr)
+	if !ok {
+		return 1
+	}
+
+	if flags.printPath {
+		fmt.Fprintln(stdout, tmpPath)
+		return 0
+	}
+
+	argv := config.BrowserCmd(rc.cfg.Browser, "file://"+tmpPath, env.LookPath, env.GOOS, stderr)
+	if err := env.Spawn(argv); err != nil {
+		fmt.Fprintf(stderr, "mdp: launching browser: %v\n", err)
+		return 1
+	}
+
+	if !flags.editEnabled(rc.cfg) {
+		return 0
+	}
+	return maybeOpenEditor(rc.src, env, stderr)
+}
+
+type runFlags struct {
+	positional string
+	theme      string
+	printPath  bool
+	editSet    bool
+	noEditSet  bool
+	editOn     bool
+}
+
+func (f runFlags) editEnabled(cfg config.Config) bool {
+	switch {
+	case f.editSet:
+		return f.editOn
+	case f.noEditSet:
+		return false
+	default:
+		return cfg.Edit
+	}
+}
+
+func parseRunFlags(args []string, stdout, stderr io.Writer) (flags runFlags, exitCode int, done bool) {
 	fs := flag.NewFlagSet("mdp", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() { fmt.Fprint(stdout, usage) }
@@ -167,73 +222,70 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 	)
 
 	if err := fs.Parse(args); err != nil {
-		// flag.ContinueOnError returns flag.ErrHelp when -h/--help is
-		// passed; fs.Usage already printed the help text, so just exit 0.
 		if err == flag.ErrHelp {
-			return 0
+			return runFlags{}, 0, true
 		}
-		return 1
+		return runFlags{}, 1, true
 	}
 
-	editSet, noEditSet := false, false
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "edit", "e":
-			editSet = true
+			flags.editSet = true
 		case "no-edit":
-			noEditSet = true
+			flags.noEditSet = true
 		}
 	})
 
-	if editSet && noEditSet {
+	if flags.editSet && flags.noEditSet {
 		fmt.Fprintln(stderr, "mdp: -e/--edit and --no-edit conflict")
-		return 1
+		return runFlags{}, 1, true
 	}
 
-	editFlagOn := *editLong || *editShort
-	printPath := *printLong || *printShort
-
-	theme := *themeLong
-	if theme == "" {
-		theme = *themeShort
+	flags.editOn = *editLong || *editShort
+	flags.printPath = *printLong || *printShort
+	flags.theme = *themeLong
+	if flags.theme == "" {
+		flags.theme = *themeShort
 	}
+	if fs.NArg() > 0 {
+		flags.positional = fs.Arg(0)
+	}
+	return flags, 0, false
+}
 
+// resolved bundles the validated context shared by `mdp <file>` and
+// `mdp watch <file>`: abs source path, normalized theme, loaded config.
+type resolved struct {
+	src   string
+	theme string
+	cfg   config.Config
+}
+
+// resolveAndValidate handles file pick + abs/stat + theme defaulting +
+// pandoc ensure for both `mdp <file>` and `mdp watch <file>`. onFzfMissing
+// is invoked when no positional was given and fzf is unavailable; its
+// return value is the exit code surfaced to the caller.
+func resolveAndValidate(positional, themeFlag string, env Environment, stderr io.Writer, onFzfMissing func() int) (rc resolved, exitCode int, done bool) {
 	cfg, err := env.LoadConfig()
 	if err != nil {
 		fmt.Fprintf(stderr, "mdp: config: %v\n", err)
 	}
+	rc.cfg = cfg
 
-	var edit bool
-	switch {
-	case editSet:
-		edit = editFlagOn
-	case noEditSet:
-		edit = false
-	default:
-		edit = cfg.Edit
-	}
-
-	file := ""
-	if fs.NArg() > 0 {
-		file = fs.Arg(0)
-	}
-
+	file := positional
 	if file == "" {
 		cwd, err := env.Getwd()
 		if err != nil {
 			fmt.Fprintf(stderr, "mdp: %v\n", err)
-			return 1
+			return rc, 1, true
 		}
 		pick, err := env.FzfPick(context.Background(), cwd)
 		if err != nil {
-			// fzf isn't installed — there's no file to render and no way
-			// to pick one. Show help on stdout (so it's pipe-friendly) and
-			// exit 0; the help text already explains the fzf integration.
-			fmt.Fprint(stdout, usage)
-			return 0
+			return rc, onFzfMissing(), true
 		}
 		if pick == "" {
-			return 0
+			return rc, 0, true
 		}
 		file = pick
 	}
@@ -241,14 +293,16 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 	src, err := filepath.Abs(file)
 	if err != nil {
 		fmt.Fprintf(stderr, "mdp: %v\n", err)
-		return 1
+		return rc, 1, true
 	}
 	info, err := env.Stat(src)
 	if err != nil || info.IsDir() {
 		fmt.Fprintf(stderr, "mdp: file not found: %s\n", src)
-		return 1
+		return rc, 1, true
 	}
+	rc.src = src
 
+	theme := themeFlag
 	if theme == "" {
 		theme = cfg.Theme
 	}
@@ -259,68 +313,62 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 		fmt.Fprintf(stderr, "mdp: invalid theme %q, using 'dark'\n", theme)
 		theme = "dark"
 	}
+	rc.theme = theme
 
 	if format := pandoc.InputFormat(src); format != "" {
 		if _, err := pandoc.Ensure(context.Background(), format, stderr); err != nil {
 			fmt.Fprintf(stderr, "mdp: %v\n", err)
-			return 1
+			return rc, 1, true
 		}
 	}
+	return rc, 0, false
+}
 
-	// .md and pandoc-renderable entries get the link-graph walker so
-	// cross-file clicks work in static mode. The BFS is capped at
-	// StaticTreeMaxFiles so a heavy linker can't run pandoc 1000 times.
-	var tmpPath string
-	if render.IsWalkableExt(src) {
-		opts := render.StaticTreeOptions{
-			Theme:    theme,
-			ExtraCSS: config.ExtraCSS(cfg, stderr),
-			Colemak:  cfg.Colemak,
-		}
-		entryHTML, err := render.RenderStaticTree(src, env.TempDir(), opts)
-		if err != nil {
-			fmt.Fprintf(stderr, "mdp: %v\n", err)
-			return 1
-		}
-		tmpPath = entryHTML
-	} else {
-		body, err := render.RenderBody(src)
-		if err != nil {
-			fmt.Fprintf(stderr, "mdp: %v\n", err)
-			return 1
-		}
-		absSrc, _ := filepath.Abs(src)
-		baseDir := filepath.Dir(absSrc)
-		body = render.RewriteImgSrc(body, baseDir, func(abs string) (string, bool) {
-			rel, err := filepath.Rel(baseDir, abs)
-			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				return "", false
-			}
-			return render.FileURL(abs), true
-		})
-		page := render.BuildPage(body, theme, 0, config.ExtraCSS(cfg, stderr), cfg.Colemak, absSrc)
-		tmpPath = tmpHTMLPath(env.TempDir(), src)
-		if err := writeTmpFile(tmpPath, []byte(page)); err != nil {
-			fmt.Fprintf(stderr, "mdp: writing tmp: %v\n", err)
-			return 1
-		}
+func renderEntry(rc resolved, env Environment, stderr io.Writer) (string, bool) {
+	if render.IsWalkableExt(rc.src) {
+		return renderEntryAsStaticTree(rc, env, stderr)
 	}
+	return renderEntryAsSingleFile(rc, env, stderr)
+}
 
-	if printPath {
-		fmt.Fprintln(stdout, tmpPath)
-		return 0
+func renderEntryAsStaticTree(rc resolved, env Environment, stderr io.Writer) (string, bool) {
+	opts := render.StaticTreeOptions{
+		Theme:    rc.theme,
+		ExtraCSS: config.ExtraCSS(rc.cfg, stderr),
+		Colemak:  rc.cfg.Colemak,
 	}
-
-	argv := config.BrowserCmd(cfg.Browser, "file://"+tmpPath, env.LookPath, env.GOOS, stderr)
-	if err := env.Spawn(argv); err != nil {
-		fmt.Fprintf(stderr, "mdp: launching browser: %v\n", err)
-		return 1
+	entryHTML, err := render.RenderStaticTree(rc.src, env.TempDir(), opts)
+	if err != nil {
+		fmt.Fprintf(stderr, "mdp: %v\n", err)
+		return "", false
 	}
+	return entryHTML, true
+}
 
-	if !edit {
-		return 0
+func renderEntryAsSingleFile(rc resolved, env Environment, stderr io.Writer) (string, bool) {
+	body, err := render.RenderBody(rc.src)
+	if err != nil {
+		fmt.Fprintf(stderr, "mdp: %v\n", err)
+		return "", false
 	}
+	baseDir := filepath.Dir(rc.src)
+	body = render.RewriteImgSrc(body, baseDir, func(abs string) (string, bool) {
+		rel, err := filepath.Rel(baseDir, abs)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "", false
+		}
+		return render.FileURL(abs), true
+	})
+	page := render.BuildPage(body, rc.theme, 0, config.ExtraCSS(rc.cfg, stderr), rc.cfg.Colemak, rc.src)
+	tmpPath := tmpHTMLPath(env.TempDir(), rc.src)
+	if err := writeTmpFile(tmpPath, []byte(page)); err != nil {
+		fmt.Fprintf(stderr, "mdp: writing tmp: %v\n", err)
+		return "", false
+	}
+	return tmpPath, true
+}
 
+func maybeOpenEditor(src string, env Environment, stderr io.Writer) int {
 	editor := ""
 	for _, c := range []string{"nvim", "vim"} {
 		if p, err := env.LookPath(c); err == nil && p != "" {
@@ -396,9 +444,6 @@ func spawnDetached(argv []string) error {
 	return cmd.Start()
 }
 
-// runWatchSubcommand handles `mdp watch [-t theme] [file]`. Picks a file
-// (positional arg or fzf), validates theme, then runs the preview server
-// with the editor-agnostic file watcher enabled.
 func runWatchSubcommand(args []string, stdout, stderr io.Writer, env Environment) int {
 	fs := flag.NewFlagSet("mdp watch", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -418,75 +463,32 @@ func runWatchSubcommand(args []string, stdout, stderr io.Writer, env Environment
 	if theme == "" {
 		theme = *themeShort
 	}
-
-	cfg, err := env.LoadConfig()
-	if err != nil {
-		fmt.Fprintf(stderr, "mdp: config: %v\n", err)
-	}
-
-	file := ""
+	positional := ""
 	if fs.NArg() > 0 {
-		file = fs.Arg(0)
-	}
-	if file == "" {
-		cwd, err := env.Getwd()
-		if err != nil {
-			fmt.Fprintf(stderr, "mdp: %v\n", err)
-			return 1
-		}
-		pick, err := env.FzfPick(context.Background(), cwd)
-		if err != nil {
-			fmt.Fprintln(stderr, "mdp watch: pass a file or install fzf for the picker")
-			return 1
-		}
-		if pick == "" {
-			return 0
-		}
-		file = pick
+		positional = fs.Arg(0)
 	}
 
-	src, err := filepath.Abs(file)
-	if err != nil {
-		fmt.Fprintf(stderr, "mdp: %v\n", err)
+	rc, code, done := resolveAndValidate(positional, theme, env, stderr, func() int {
+		fmt.Fprintln(stderr, "mdp watch: pass a file or install fzf for the picker")
 		return 1
-	}
-	info, err := env.Stat(src)
-	if err != nil || info.IsDir() {
-		fmt.Fprintf(stderr, "mdp: file not found: %s\n", src)
-		return 1
-	}
-
-	if theme == "" {
-		theme = cfg.Theme
-	}
-	if theme == "" {
-		theme = "dark"
-	}
-	if theme != "dark" && theme != "light" {
-		fmt.Fprintf(stderr, "mdp: invalid theme %q, using 'dark'\n", theme)
-		theme = "dark"
-	}
-
-	if format := pandoc.InputFormat(src); format != "" {
-		if _, err := pandoc.Ensure(context.Background(), format, stderr); err != nil {
-			fmt.Fprintf(stderr, "mdp: %v\n", err)
-			return 1
-		}
+	})
+	if done {
+		return code
 	}
 
 	opts := server.Options{
-		File:     src,
-		Port:     0, // kernel-assigned ephemeral port
-		Theme:    theme,
-		Colemak:  cfg.Colemak,
+		File:     rc.src,
+		Port:     0,
+		Theme:    rc.theme,
+		Colemak:  rc.cfg.Colemak,
 		Watch:    true,
-		ExtraCSS: config.ExtraCSS(cfg, stderr),
+		ExtraCSS: config.ExtraCSS(rc.cfg, stderr),
 	}
 
 	if envFlagOn("MDP_NATIVE") && env.OpenWindow != nil {
-		return runWatchWithNativeWindow(opts, cfg, env, stderr)
+		return runWatchWithNativeWindow(opts, rc.cfg, env, stderr)
 	}
-	return runWatchWithBrowser(opts, cfg, env, stderr)
+	return runWatchWithBrowser(opts, rc.cfg, env, stderr)
 }
 
 // envFlagOn returns true for "1" or "true" so MDP_NATIVE matches the
