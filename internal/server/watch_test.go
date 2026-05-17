@@ -88,6 +88,68 @@ func TestWatchFile_NoChangeNoBump(t *testing.T) {
 	}
 }
 
+// Atomic save: editors like vim write to a sibling tmp then rename it
+// over the target. The watcher must still bump renderVersion.
+func TestWatchFile_SurvivesAtomicSave(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "doc.md")
+	if err := os.WriteFile(file, []byte("# v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := newState(file, 0, "dark", false)
+	s.doRender()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go watchFile(ctx, s)
+
+	time.Sleep(50 * time.Millisecond)
+
+	stage := filepath.Join(dir, "doc.md.tmp")
+	if err := os.WriteFile(stage, []byte("# v2 from atomic save\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(2 * time.Second)
+	_ = os.Chtimes(stage, future, future)
+	if err := os.Rename(stage, file); err != nil {
+		t.Fatal(err)
+	}
+
+	got := waitForVersion(s, 2, 2*time.Second)
+	if got < 2 {
+		t.Errorf("renderVersion = %d after atomic save, want >= 2", got)
+	}
+}
+
+func TestWatchFile_TruncateBumpsVersion(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "doc.md")
+	if err := os.WriteFile(file, []byte("# initial body\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := newState(file, 0, "dark", false)
+	s.doRender()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go watchFile(ctx, s)
+
+	time.Sleep(50 * time.Millisecond)
+
+	if err := os.Truncate(file, 0); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(2 * time.Second)
+	_ = os.Chtimes(file, future, future)
+
+	got := waitForVersion(s, 2, 2*time.Second)
+	if got < 2 {
+		t.Errorf("renderVersion = %d after truncate, want >= 2", got)
+	}
+}
+
 func TestWatchFile_StopsOnContextCancel(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "doc.md")

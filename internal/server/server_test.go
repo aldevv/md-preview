@@ -514,6 +514,80 @@ func TestHandler_GetImg_RejectsSymlinkEscape(t *testing.T) {
 	}
 }
 
+func TestHandler_GetImg_SetsCacheControlNoStore(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	if err := os.WriteFile(filepath.Join(dir, "pic.png"), []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestState(t, file)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/_img/pic.png")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+}
+
+// Every /render error path must return application/json with a parseable
+// {"error": "..."} body so the WS-client click handler can toast it.
+func TestHandler_PostRender_ErrorsAreJSON(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	weird := filepath.Join(dir, "binary.bin")
+	if err := os.WriteFile(weird, []byte("not renderable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := newTestState(t, file)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	cases := []struct {
+		name      string
+		file      string
+		wantCodes []int
+	}{
+		{"out of tree", "/etc/passwd", []int{http.StatusForbidden}},
+		{"missing", filepath.Join(dir, "nope.md"), []int{http.StatusNotFound}},
+		{"unsupported extension", weird, []int{http.StatusUnsupportedMediaType}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, _ := json.Marshal(map[string]string{"file": tc.file})
+			resp, err := http.Post(srv.URL+"/render", "application/json", bytes.NewReader(body))
+			if err != nil {
+				t.Fatalf("POST: %v", err)
+			}
+			defer resp.Body.Close()
+			matched := false
+			for _, c := range tc.wantCodes {
+				if resp.StatusCode == c {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				t.Errorf("status = %d, want one of %v", resp.StatusCode, tc.wantCodes)
+			}
+			if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", ct)
+			}
+			var got map[string]string
+			if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+				t.Fatalf("decode body: %v", err)
+			}
+			if got["error"] == "" {
+				t.Errorf("body missing 'error' field: %v", got)
+			}
+		})
+	}
+}
+
 func TestHandler_GetHTML_LeavesOutOfTreeImgSrcUntouched(t *testing.T) {
 	dir := t.TempDir()
 	file := writeMD(t, dir, "doc.md", "![out](/etc/passwd)\n")
