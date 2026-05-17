@@ -291,6 +291,14 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 			return 1
 		}
 		absSrc, _ := filepath.Abs(src)
+		baseDir := filepath.Dir(absSrc)
+		body = render.RewriteImgSrc(body, baseDir, func(abs string) (string, bool) {
+			rel, err := filepath.Rel(baseDir, abs)
+			if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return "", false
+			}
+			return render.FileURL(abs), true
+		})
 		page := render.BuildPage(body, theme, 0, config.ExtraCSS(cfg, stderr), cfg.Colemak, absSrc)
 		tmpPath = tmpHTMLPath(env.TempDir(), src)
 		if err := writeTmpFile(tmpPath, []byte(page)); err != nil {

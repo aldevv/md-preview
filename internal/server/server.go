@@ -29,15 +29,22 @@ const (
 )
 
 type state struct {
-	mu            sync.Mutex
-	file          string
-	fileDir       string // /render path-overrides must stay inside it
-	htmlCache     string
-	renderVersion int
-	theme         string
-	port          int
-	colemak       bool
-	wsClients     map[net.Conn]struct{}
+	mu sync.Mutex
+	// file and fileDir change at runtime under mu. fileDirResolved is
+	// the EvalSymlinks of fileDir captured at construction time and
+	// is immutable; handleImg compares EvalSymlinks(image) against
+	// it so served dirs sitting under a symlinked tree (macOS
+	// /var/folders → /private/var/folders, NixOS, encfs) don't 403
+	// every legitimate image.
+	file            string
+	fileDir         string
+	fileDirResolved string
+	htmlCache       string
+	renderVersion   int
+	theme           string
+	port            int
+	colemak         bool
+	wsClients       map[net.Conn]struct{}
 }
 
 func newState(file string, port int, theme string, colemak bool) *state {
@@ -45,13 +52,19 @@ func newState(file string, port int, theme string, colemak bool) *state {
 	if err != nil {
 		abs = file
 	}
+	dir := filepath.Dir(abs)
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		resolved = dir
+	}
 	return &state{
-		file:      abs,
-		fileDir:   filepath.Dir(abs),
-		port:      port,
-		theme:     theme,
-		colemak:   colemak,
-		wsClients: make(map[net.Conn]struct{}),
+		file:            abs,
+		fileDir:         dir,
+		fileDirResolved: resolved,
+		port:            port,
+		theme:           theme,
+		colemak:         colemak,
+		wsClients:       make(map[net.Conn]struct{}),
 	}
 }
 
@@ -190,6 +203,7 @@ func newHandler(s *state) http.Handler {
 	mux.HandleFunc("/ws", guard(http.MethodGet, s.handleWS))
 	mux.HandleFunc("/render", guard(http.MethodPost, s.handleRender))
 	mux.HandleFunc("/scroll", guard(http.MethodPost, s.handleScroll))
+	mux.HandleFunc("/_img/", guard(http.MethodGet, s.handleImg))
 	return mux
 }
 
@@ -199,14 +213,78 @@ func (s *state) handleIndex(w http.ResponseWriter, r *http.Request) {
 	theme := s.theme
 	port := s.port
 	colemak := s.colemak
+	file := s.file
 	s.mu.Unlock()
 
-	page := render.BuildPage(body, theme, port, "", colemak, s.file)
+	body = render.RewriteImgSrc(body, filepath.Dir(file), s.imgURL)
+
+	page := render.BuildPage(body, theme, port, "", colemak, file)
 	encoded := []byte(page)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(len(encoded)))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(encoded)
+}
+
+// imgURL maps an absolute image path to its /_img/ URL, or ok=false
+// when it falls outside the served directory so the rewriter leaves
+// the original src visible-broken in DevTools rather than silently
+// rewriting to a 403. fileDir is immutable post-construction so this
+// reads it without taking s.mu.
+func (s *state) imgURL(abs string) (string, bool) {
+	if !pathInsideDir(abs, s.fileDir) {
+		return "", false
+	}
+	rel, err := filepath.Rel(s.fileDir, abs)
+	if err != nil {
+		return "", false
+	}
+	u := url.URL{Path: "/_img/" + filepath.ToSlash(rel)}
+	return u.String(), true
+}
+
+// maxImgBytes caps the size of a single response from /_img/. A
+// markdown can point <img src> at any file in the served directory;
+// the cap stops a 50 GB sibling from being streamed in full.
+const maxImgBytes = 100 << 20
+
+func (s *state) handleImg(w http.ResponseWriter, r *http.Request) {
+	rel := strings.TrimPrefix(r.URL.Path, "/_img/")
+	if rel == "" {
+		http.NotFound(w, r)
+		return
+	}
+	abs := filepath.Clean(filepath.Join(s.fileDir, filepath.FromSlash(rel)))
+	if !pathInsideDir(abs, s.fileDir) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	// Re-check after symlink resolution: pathInsideDir is lexical, so
+	// a symlink inside fileDir pointing at /etc/passwd would otherwise
+	// be served verbatim by http.ServeFile. Compare against the
+	// resolved fileDir so served trees that themselves traverse a
+	// symlink (macOS /var/folders → /private/var/folders) still
+	// accept their own legitimate images.
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if !pathInsideDir(resolved, s.fileDirResolved) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || info.IsDir() {
+		http.NotFound(w, r)
+		return
+	}
+	if info.Size() > maxImgBytes {
+		http.Error(w, "image too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	http.ServeFile(w, r, resolved)
 }
 
 func (s *state) handleReload(w http.ResponseWriter, r *http.Request) {

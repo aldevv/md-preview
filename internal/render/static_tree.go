@@ -112,6 +112,12 @@ func RenderStaticTree(entry, tmpDir string, opts StaticTreeOptions) (string, err
 
 	for src, body := range bodies {
 		rewritten := RewriteStaticLinks(body, src, rootDir, rendered)
+		rewritten = RewriteImgSrc(rewritten, filepath.Dir(src), func(abs string) (string, bool) {
+			if !pathInsideDir(abs, rootDir) {
+				return "", false
+			}
+			return FileURL(abs), true
+		})
 		page := BuildPage(rewritten, opts.Theme, 0, opts.ExtraCSS, opts.Colemak, src)
 		if err := writeStaticTmpFile(rendered[src], []byte(page)); err != nil {
 			return "", err

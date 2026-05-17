@@ -249,7 +249,7 @@ func TestHandler_RejectsForeignOrigin(t *testing.T) {
 	srv := httptest.NewServer(newHandler(s))
 	defer srv.Close()
 
-	for _, path := range []string{"/", "/reload", "/render", "/scroll", "/ws"} {
+	for _, path := range []string{"/", "/reload", "/render", "/scroll", "/ws", "/_img/pic.png"} {
 		method := http.MethodGet
 		if path == "/render" || path == "/scroll" {
 			method = http.MethodPost
@@ -285,6 +285,308 @@ func TestHandler_RejectsForeignHost(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("rebound Host → status = %d, want 403", resp.StatusCode)
+	}
+}
+
+func TestHandler_GetImg_ServesFileInsideDir(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	imgBytes := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 0}
+	if err := os.WriteFile(filepath.Join(dir, "pic.png"), imgBytes, 0o644); err != nil {
+		t.Fatalf("write pic.png: %v", err)
+	}
+	s := newTestState(t, file)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/_img/pic.png")
+	if err != nil {
+		t.Fatalf("GET /_img/pic.png: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	if !bytes.Equal(got, imgBytes) {
+		t.Errorf("body = %x, want %x", got, imgBytes)
+	}
+}
+
+func TestHandler_GetImg_404OnMissing(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	s := newTestState(t, file)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/_img/nope.png")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestHandler_GetImg_404OnDirectory(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	s := newTestState(t, file)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/_img/sub")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// Go's http.ServeMux cleans /_img/../etc to /etc before dispatch, so the
+// only way an outside path reaches handleImg is via a literal segment
+// that resolves out. Exercise that codepath directly.
+func TestHandleImg_RejectsEscapeAttempt(t *testing.T) {
+	outerDir := t.TempDir()
+	innerDir := filepath.Join(outerDir, "served")
+	if err := os.Mkdir(innerDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	file := writeMD(t, innerDir, "doc.md", "# Hello\n")
+	target := filepath.Join(outerDir, "secret.txt")
+	if err := os.WriteFile(target, []byte("nope"), 0o644); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+	s := newTestState(t, file)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/_img/../secret.txt", nil)
+	s.handleImg(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", rr.Code)
+	}
+}
+
+// Sparse file via Truncate keeps the test cheap on disk while
+// info.Size() still trips the maxImgBytes cap.
+func TestHandler_GetImg_RejectsOversizedFile(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	big, err := os.Create(filepath.Join(dir, "big.png"))
+	if err != nil {
+		t.Fatalf("create big: %v", err)
+	}
+	if err := big.Truncate(int64(maxImgBytes) + 1); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	big.Close()
+	s := newTestState(t, file)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/_img/big.png")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413", resp.StatusCode)
+	}
+}
+
+func TestHandler_GetImg_URLEncodedTraversal(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	if err := os.WriteFile(filepath.Join(filepath.Dir(dir), "secret.txt"), []byte("nope"), 0o644); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+	s := newTestState(t, file)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	// %2e%2e decodes to ".." before the mux routes; the cleaned path
+	// either redirects out of /_img/ or 404s, but must never serve the
+	// sibling secret.
+	resp, err := http.Get(srv.URL + "/_img/%2e%2e/secret.txt")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusOK && bytes.Contains(body, []byte("nope")) {
+		t.Errorf("URL-encoded traversal leaked secret content: %s", body)
+	}
+}
+
+// Regression for the macOS /var/folders → /private/var/folders class
+// of bug: when the served dir itself traverses a symlink, EvalSymlinks
+// on a legitimate image inside it returns the resolved-tree path,
+// which must still pass the post-resolve confinement check.
+func TestHandler_GetImg_AcceptsServedDirThroughSymlink(t *testing.T) {
+	real := t.TempDir()
+	if err := os.WriteFile(filepath.Join(real, "pic.png"), []byte("png"), 0o644); err != nil {
+		t.Fatalf("write pic: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "doc.md"), []byte("# Hello\n"), 0o644); err != nil {
+		t.Fatalf("write doc: %v", err)
+	}
+
+	parent := t.TempDir()
+	linked := filepath.Join(parent, "served")
+	if err := os.Symlink(real, linked); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	s := newTestState(t, filepath.Join(linked, "doc.md"))
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/_img/pic.png")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200 for image under symlinked served dir", resp.StatusCode)
+	}
+}
+
+func TestHandler_GetImg_RejectsNonGET(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	if err := os.WriteFile(filepath.Join(dir, "pic.png"), []byte("png"), 0o644); err != nil {
+		t.Fatalf("write pic: %v", err)
+	}
+	s := newTestState(t, file)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	for _, m := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+		req, _ := http.NewRequest(m, srv.URL+"/_img/pic.png", strings.NewReader(""))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s: %v", m, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Errorf("%s status = %d, want 405", m, resp.StatusCode)
+		}
+	}
+}
+
+// Symlink inside the served dir that points outside must not exfiltrate
+// the target. http.ServeFile follows symlinks, so handleImg re-runs
+// pathInsideDir on the resolved path.
+func TestHandler_GetImg_RejectsSymlinkEscape(t *testing.T) {
+	outer := t.TempDir()
+	inner := filepath.Join(outer, "served")
+	if err := os.Mkdir(inner, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	file := writeMD(t, inner, "doc.md", "# Hello\n")
+	target := filepath.Join(outer, "secret.txt")
+	if err := os.WriteFile(target, []byte("nope"), 0o644); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(inner, "evil.png")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	s := newTestState(t, file)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/_img/evil.png")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusOK && bytes.Contains(body, []byte("nope")) {
+		t.Errorf("symlink to outside dir leaked secret; status=%d body=%s", resp.StatusCode, body)
+	}
+}
+
+func TestHandler_GetHTML_LeavesOutOfTreeImgSrcUntouched(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "![out](/etc/passwd)\n")
+	s := newTestState(t, file)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `src="/etc/passwd"`) {
+		t.Errorf("expected original out-of-tree src preserved; body=%s", body)
+	}
+	if strings.Contains(string(body), `/_img/etc/passwd`) {
+		t.Errorf("out-of-tree path leaked into /_img/ rewrite")
+	}
+}
+
+func TestHandler_PostRender_RewritesImgsAgainstNewFileDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	root := writeMD(t, dir, "root.md", "# Root\n")
+	sub := writeMD(t, filepath.Join(dir, "sub"), "page.md", "![](inner.png)\n")
+	if err := os.WriteFile(filepath.Join(dir, "sub", "inner.png"), []byte("png"), 0o644); err != nil {
+		t.Fatalf("write inner: %v", err)
+	}
+	s := newTestState(t, root)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	body, _ := json.Marshal(map[string]string{"file": sub})
+	resp, err := http.Post(srv.URL+"/render", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /render: %v", err)
+	}
+	resp.Body.Close()
+
+	resp, err = http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer resp.Body.Close()
+	page, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(page), `src="/_img/sub/inner.png"`) {
+		t.Errorf("expected /_img/sub/inner.png after switch; body=%s", page)
+	}
+}
+
+func TestHandler_GetHTML_RewritesLocalImgSrcs(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "![](pic.png)\n![remote](https://example.com/x.png)\n")
+	if err := os.WriteFile(filepath.Join(dir, "pic.png"), []byte("png"), 0o644); err != nil {
+		t.Fatalf("write pic: %v", err)
+	}
+	s := newTestState(t, file)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `src="/_img/pic.png"`) {
+		t.Errorf("body missing rewritten local src: %s", body)
+	}
+	if !strings.Contains(string(body), `src="https://example.com/x.png"`) {
+		t.Errorf("body missing untouched remote src")
 	}
 }
 

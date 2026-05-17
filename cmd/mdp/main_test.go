@@ -125,6 +125,36 @@ func TestRun_PrintMode(t *testing.T) {
 	}
 }
 
+func TestRun_PrintMode_RewritesLocalImgToFileURL(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "doc.md")
+	if err := os.WriteFile(src, []byte("![](pic.png)\n![remote](https://example.com/x.png)\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pic.png"), []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errb bytes.Buffer
+	env := testEnv(t)
+	code := run([]string{"-p", src}, nil, &out, &errb, env)
+	if code != 0 {
+		t.Fatalf("exit code = %d; stderr=%s", code, errb.String())
+	}
+	tmpPath := strings.TrimSpace(out.String())
+	data, err := os.ReadFile(tmpPath)
+	if err != nil {
+		t.Fatalf("read tmp: %v", err)
+	}
+	wantLocal := "file://" + filepath.Join(dir, "pic.png")
+	if !strings.Contains(string(data), `src="`+wantLocal+`"`) {
+		t.Errorf("expected %q in HTML; got %q", wantLocal, string(data))
+	}
+	if !strings.Contains(string(data), `src="https://example.com/x.png"`) {
+		t.Errorf("expected untouched remote src in HTML")
+	}
+}
+
 func TestRun_ThemeFlag(t *testing.T) {
 	var out, errb bytes.Buffer
 	env := testEnv(t)

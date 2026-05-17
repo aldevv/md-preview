@@ -59,6 +59,50 @@ func TestRenderStaticTree_FollowsMdLinks(t *testing.T) {
 	}
 }
 
+func TestRenderStaticTree_RewritesImgSrcsPerFile(t *testing.T) {
+	root := t.TempDir()
+	tmp := t.TempDir()
+	entry := writeMD(t, root, "index.md", "![](pic.png)\n[sub](sub/page.md)\n")
+	sibling := writeMD(t, root, "sub/page.md", "![](inner.png)\n")
+	if err := os.WriteFile(filepath.Join(root, "pic.png"), []byte("p"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sub", "inner.png"), []byte("p"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RenderStaticTree(entry, tmp, StaticTreeOptions{Theme: "dark"}); err != nil {
+		t.Fatalf("RenderStaticTree: %v", err)
+	}
+
+	entryHTML, _ := os.ReadFile(TmpHTMLPath(tmp, entry))
+	wantEntry := FileURL(filepath.Join(root, "pic.png"))
+	if !strings.Contains(string(entryHTML), `src="`+wantEntry+`"`) {
+		t.Errorf("entry HTML missing %q\nbody=%s", wantEntry, entryHTML)
+	}
+
+	siblingHTML, _ := os.ReadFile(TmpHTMLPath(tmp, sibling))
+	wantSibling := FileURL(filepath.Join(root, "sub", "inner.png"))
+	if !strings.Contains(string(siblingHTML), `src="`+wantSibling+`"`) {
+		t.Errorf("sibling HTML missing %q (resolved against sibling's dir)\nbody=%s", wantSibling, siblingHTML)
+	}
+}
+
+func TestRenderStaticTree_OutOfTreeImgSrcLeftUntouched(t *testing.T) {
+	root := t.TempDir()
+	tmp := t.TempDir()
+	entry := writeMD(t, root, "index.md", "![](/etc/passwd)\n")
+	if _, err := RenderStaticTree(entry, tmp, StaticTreeOptions{Theme: "dark"}); err != nil {
+		t.Fatalf("RenderStaticTree: %v", err)
+	}
+	got, _ := os.ReadFile(TmpHTMLPath(tmp, entry))
+	if !strings.Contains(string(got), `src="/etc/passwd"`) {
+		t.Errorf("expected unrewritten /etc/passwd src; body=%s", got)
+	}
+	if strings.Contains(string(got), "file:///etc/passwd") {
+		t.Errorf("out-of-tree path was rewritten to file:// scheme; body=%s", got)
+	}
+}
+
 func TestRenderStaticTree_OutOfTreeBecomesToast(t *testing.T) {
 	root := t.TempDir()
 	tmp := t.TempDir()
