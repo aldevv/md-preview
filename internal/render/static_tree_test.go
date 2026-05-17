@@ -363,6 +363,134 @@ func TestPandocParallelism_EnvOverrideClamps(t *testing.T) {
 	}
 }
 
+// Out-of-tree symlink target inside the link graph must rewrite to a
+// toast sentinel and never write the foreign body to a tmp HTML.
+func TestRenderStaticTree_SymlinkEscapeBecomesToast(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	tmp := t.TempDir()
+
+	secret := filepath.Join(outside, "passwd.md")
+	if err := os.WriteFile(secret, []byte("# CLASSIFIED\nhunter2-secret-marker\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := writeMD(t, root, "a.md", "# A\n[escape](evil.md)\n")
+	if err := os.Symlink(secret, filepath.Join(root, "evil.md")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	entry, err := RenderStaticTree(a, tmp, StaticTreeOptions{Theme: "dark"})
+	if err != nil {
+		t.Fatalf("RenderStaticTree: %v", err)
+	}
+	entryBody, _ := os.ReadFile(entry)
+	if !strings.Contains(string(entryBody), "mdpStaticToast") {
+		t.Errorf("symlink-escape href should be a toast sentinel; body=%s", entryBody)
+	}
+	if !strings.Contains(string(entryBody), url.QueryEscape("out of tree")) {
+		t.Errorf("toast payload missing 'out of tree' reason: %s", entryBody)
+	}
+
+	tmpEntries, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range tmpEntries {
+		data, err := os.ReadFile(filepath.Join(tmp, e.Name()))
+		if err != nil {
+			continue
+		}
+		if strings.Contains(string(data), "hunter2-secret-marker") {
+			t.Errorf("tmp file %s leaked symlink-target contents", e.Name())
+		}
+	}
+}
+
+// A symlink that resolves to a sibling inside the tree is fine. The
+// resolved path is what gets rendered, so a symlink alias does not
+// produce a duplicate body.
+func TestRenderStaticTree_SymlinkInsideTreeStillRendered(t *testing.T) {
+	root := t.TempDir()
+	tmp := t.TempDir()
+
+	real := writeMD(t, root, "real.md", "# Real\n")
+	if err := os.Symlink(real, filepath.Join(root, "link.md")); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+	a := writeMD(t, root, "a.md", "# A\n[via link](link.md)\n[via real](real.md)\n")
+
+	if _, err := RenderStaticTree(a, tmp, StaticTreeOptions{Theme: "dark"}); err != nil {
+		t.Fatalf("RenderStaticTree: %v", err)
+	}
+
+	realTmp := TmpHTMLPath(tmp, real)
+	if _, err := os.Stat(realTmp); err != nil {
+		t.Errorf("real.md should have been pre-rendered at %s: %v", realTmp, err)
+	}
+	linkTmp := TmpHTMLPath(tmp, filepath.Join(root, "link.md"))
+	if linkTmp != realTmp {
+		t.Errorf("TmpHTMLPath collapsed differently for symlink vs target: link=%s real=%s",
+			linkTmp, realTmp)
+	}
+}
+
+func TestRenderStaticTree_TexEntryLinksToMd(t *testing.T) {
+	if !pandoc.Available() {
+		t.Skip("pandoc not on PATH")
+	}
+	root := t.TempDir()
+	tmp := t.TempDir()
+	paper := filepath.Join(root, "paper.tex")
+	if err := os.WriteFile(paper, []byte(`\section{A}\href{notes.md}{see notes}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	notes := writeMD(t, root, "notes.md", "# Notes\n")
+
+	entryHTML, err := RenderStaticTree(paper, tmp, StaticTreeOptions{Theme: "dark"})
+	if err != nil {
+		t.Fatalf("RenderStaticTree: %v", err)
+	}
+	notesTmp := TmpHTMLPath(tmp, notes)
+	if _, err := os.Stat(notesTmp); err != nil {
+		t.Errorf("notes.md should have been pre-rendered at %s: %v", notesTmp, err)
+	}
+	body, _ := os.ReadFile(entryHTML)
+	wantHref := "file://" + notesTmp
+	if !strings.Contains(string(body), wantHref) {
+		t.Errorf("entry HTML missing tex-to-md link rewrite to %s, body=%s", wantHref, body)
+	}
+}
+
+// Pandoc unavailable on a sibling .tex link: entry markdown still
+// renders, sibling tmp HTML contains an inline error body.
+func TestRenderStaticTree_PartialFailureFallsThrough(t *testing.T) {
+	hideFromPath(t)
+
+	root := t.TempDir()
+	tmp := t.TempDir()
+	tex := filepath.Join(root, "broken.tex")
+	if err := os.WriteFile(tex, []byte(`\section{X}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := writeMD(t, root, "a.md", "# A\n[broken](broken.tex)\n")
+
+	entry, err := RenderStaticTree(a, tmp, StaticTreeOptions{Theme: "dark"})
+	if err != nil {
+		t.Fatalf("RenderStaticTree: %v", err)
+	}
+	if _, err := os.Stat(entry); err != nil {
+		t.Fatalf("entry tmp missing: %v", err)
+	}
+	siblingTmp := TmpHTMLPath(tmp, tex)
+	siblingBody, err := os.ReadFile(siblingTmp)
+	if err != nil {
+		t.Fatalf("sibling tmp missing: %v", err)
+	}
+	if !strings.Contains(string(siblingBody), "Error rendering") {
+		t.Errorf("sibling tmp should contain inline 'Error rendering' body: %s", siblingBody)
+	}
+}
+
 func TestRenderStaticTree_ExternalAndAnchorLinksUntouched(t *testing.T) {
 	root := t.TempDir()
 	tmp := t.TempDir()
