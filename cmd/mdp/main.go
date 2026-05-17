@@ -616,7 +616,10 @@ func runServe(args []string, stderr io.Writer) int {
 		colemak = true
 	}
 	if format := pandoc.InputFormat(args[0]); format != "" {
-		if _, err := pandoc.Ensure(context.Background(), format, stderr); err != nil {
+		// pandoc.Ensure writes install-progress lines to its writer; the
+		// nvim plugin's on_stderr surfaces those as red error toasts, so
+		// silence them in serve mode. run()/runWatchSubcommand keep stderr.
+		if _, err := pandoc.Ensure(context.Background(), format, io.Discard); err != nil {
 			fmt.Fprintf(stderr, "mdp serve: %v\n", err)
 			return 1
 		}

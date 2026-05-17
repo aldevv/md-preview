@@ -217,71 +217,24 @@ ws.onclose = () => {
 };
 `
 
-// BuildPage wraps an HTML body in the preview page template.
-//
-// theme selects the color palette: "dark" (default) or "light".
-// wsPort > 0 embeds the WebSocket scroll/reload client.
-// extraCSS is appended after the default CSS so it wins via cascade.
-// colemak swaps the in-page nav keys from j/k/l to n/e/i.
-// currentFile is the absolute path of the document being rendered,
-// exposed to the click handler so it can resolve relative hrefs
-// against its directory. Empty when no file context is meaningful
-// (e.g. ad-hoc RenderBytes callers).
-func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, currentFile string) string {
-	cssVars := CSSDark
-	hljsThemeCSS := hljsThemeDarkCSS
-	if theme == "light" {
-		cssVars = CSSLight
-		hljsThemeCSS = hljsThemeLightCSS
-	}
-
-	wsScript := ""
-	if wsPort > 0 {
-		wsScript = strings.ReplaceAll(wsScriptTemplate, "__PORT__", fmt.Sprintf("%d", wsPort))
-	}
-	// Embed the current file path as a JS string literal so the
-	// click-to-navigate handler can resolve relative hrefs. Empty
-	// values (RenderBytes, tests) get an empty string; the handler
-	// no-ops when it's empty. fmt.Sprintf("%q", s) is Go-quoting,
-	// valid JS (handles backslashes, quotes, and unicode escapes).
-	currentFileJS := fmt.Sprintf("%q", currentFile)
-
-	// Skip the ~645 KiB KaTeX bundle when the body has no math markers.
-	katexCSSOut, katexJSOut, katexAutoRenderJSOut := "", "", ""
-	if hasMath(body) {
-		katexCSSOut = katexCSS
-		katexJSOut = katexScript
-		katexAutoRenderJSOut = katexAutoRenderScript
-	}
-	// Skip the ~3.3 MiB mermaid bundle when no mermaid fence is present.
-	mermaidJSOut, mermaidInit := "", ""
-	if hasMermaid(body) {
-		mermaidJSOut = mermaidScript
-		mermaidInit = `mermaid.initialize({startOnLoad:true,theme:'` + mermaidTheme(theme) + `'});`
-	}
-	// Skip the ~121 KiB highlight.js bundle + theme CSS when the body
-	// has no fenced code with a language. hljsHighlightCall is omitted
-	// alongside so the page doesn't ReferenceError on hljs.
-	hljsThemeOut, hljsScriptOut, hljsHighlightCall := "", "", ""
-	if hasCodeFence(body) {
-		hljsThemeOut = hljsThemeCSS
-		hljsScriptOut = hljsScript
-		hljsHighlightCall = "hljs.highlightAll();"
-	}
-
-	return fmt.Sprintf(`<!DOCTYPE html>
+// pageTemplate is the preview page body. Placeholders match the
+// __TOKEN__ style used by vimKeysScriptTemplate / wsScriptTemplate
+// and are filled by strings.NewReplacer in BuildPage. Named
+// placeholders avoid the positional-arg fragility that a 17-arg
+// fmt.Sprintf would carry.
+const pageTemplate = `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-%s
-%s
-%s
-%s
-%s
-%s
-%s
+__HLJS_THEME_CSS__
+__CSS_VARS__
+__CSS_COMMON__
+__PANDOC_CSS__
+__CHROME_CSS__
+__KATEX_CSS__
+__EXTRA_CSS__
 .katex { color: var(--color-text-primary); }
 </style>
 </head>
@@ -289,11 +242,11 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, cu
 <button id="mdp-back" class="mdp-nav-btn" aria-label="Back" title="Back" hidden>&#8249;</button>
 <button id="mdp-fwd" class="mdp-nav-btn" aria-label="Forward" title="Forward" hidden>&#8250;</button>
 <div id="content" class="markdown-body">
-%s
+__BODY__
 </div>
 <div id="mdp-toast" hidden></div>
 <script>
-window.mdpCurrentFile = %s;
+window.mdpCurrentFile = __CURRENT_FILE_JS__;
 // mdpStack + mdpIdx track the user's nav path so back/forward
 // buttons reflect actual nav state (not browser history length,
 // which includes pre-mdp entries). sessionStorage persists across
@@ -374,10 +327,10 @@ document.addEventListener('click', (e) => {
   e.preventDefault();
   window.open(href, '_blank', 'noopener,noreferrer');
 });
-%s
-%s
-%s
-%s
+__HLJS_SCRIPT__
+__HLJS_HIGHLIGHT_CALL__
+__KATEX_SCRIPT__
+__KATEX_AUTORENDER_SCRIPT__
 function mdpRenderMath() {
   if (typeof renderMathInElement !== "function") return;
   renderMathInElement(document.querySelector("#content"), {
@@ -391,13 +344,78 @@ function mdpRenderMath() {
 }
 window.mdpRenderMath = mdpRenderMath;
 mdpRenderMath();
-%s
-%s
-%s
-%s
+__MERMAID_SCRIPT__
+__MERMAID_INIT__
+__VIM_KEYS__
+__WS_SCRIPT__
 </script>
 </body>
-</html>`, hljsThemeOut, cssVars, CSSCommon, pandocCSS, chromeCSS, katexCSSOut, extraCSS, body, currentFileJS, hljsScriptOut, hljsHighlightCall, katexJSOut, katexAutoRenderJSOut, mermaidJSOut, mermaidInit, vimKeys(colemak, wsPort == 0), wsScript)
+</html>`
+
+// BuildPage wraps an HTML body in the preview page template.
+//
+// theme selects the color palette: "dark" (default) or "light".
+// wsPort > 0 embeds the WebSocket scroll/reload client.
+// extraCSS is appended after the default CSS so it wins via cascade.
+// colemak swaps the in-page nav keys from j/k/l to n/e/i.
+// currentFile is the absolute path of the document being rendered,
+// exposed to the click handler so it can resolve relative hrefs
+// against its directory. Empty when no file context is meaningful
+// (e.g. ad-hoc RenderBytes callers).
+func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, currentFile string) string {
+	cssVars := CSSDark
+	hljsThemeCSS := hljsThemeDarkCSS
+	if theme == "light" {
+		cssVars = CSSLight
+		hljsThemeCSS = hljsThemeLightCSS
+	}
+
+	wsScript := ""
+	if wsPort > 0 {
+		wsScript = strings.ReplaceAll(wsScriptTemplate, "__PORT__", fmt.Sprintf("%d", wsPort))
+	}
+	// fmt.Sprintf("%q", s) Go-quotes the path into a valid JS string
+	// literal (handles backslashes, quotes, unicode escapes). Empty
+	// currentFile becomes "" and the click handler no-ops.
+	currentFileJS := fmt.Sprintf("%q", currentFile)
+
+	katexCSSOut, katexJSOut, katexAutoRenderJSOut := "", "", ""
+	if hasMath(body) {
+		katexCSSOut = katexCSS
+		katexJSOut = katexScript
+		katexAutoRenderJSOut = katexAutoRenderScript
+	}
+	mermaidJSOut, mermaidInit := "", ""
+	if hasMermaid(body) {
+		mermaidJSOut = mermaidScript
+		mermaidInit = `mermaid.initialize({startOnLoad:true,theme:'` + mermaidTheme(theme) + `'});`
+	}
+	hljsThemeOut, hljsScriptOut, hljsHighlightCall := "", "", ""
+	if hasCodeFence(body) {
+		hljsThemeOut = hljsThemeCSS
+		hljsScriptOut = hljsScript
+		hljsHighlightCall = "hljs.highlightAll();"
+	}
+
+	return strings.NewReplacer(
+		"__HLJS_THEME_CSS__", hljsThemeOut,
+		"__CSS_VARS__", cssVars,
+		"__CSS_COMMON__", CSSCommon,
+		"__PANDOC_CSS__", pandocCSS,
+		"__CHROME_CSS__", chromeCSS,
+		"__KATEX_CSS__", katexCSSOut,
+		"__EXTRA_CSS__", extraCSS,
+		"__BODY__", body,
+		"__CURRENT_FILE_JS__", currentFileJS,
+		"__HLJS_SCRIPT__", hljsScriptOut,
+		"__HLJS_HIGHLIGHT_CALL__", hljsHighlightCall,
+		"__KATEX_SCRIPT__", katexJSOut,
+		"__KATEX_AUTORENDER_SCRIPT__", katexAutoRenderJSOut,
+		"__MERMAID_SCRIPT__", mermaidJSOut,
+		"__MERMAID_INIT__", mermaidInit,
+		"__VIM_KEYS__", vimKeys(colemak, wsPort == 0),
+		"__WS_SCRIPT__", wsScript,
+	).Replace(pageTemplate)
 }
 
 // hasMermaid reports whether the rendered body contains a mermaid
