@@ -4,4 +4,5 @@
 *.out
 .DS_Store
 .claude/
+.playwright-mcp/
 CLAUDE.local.md

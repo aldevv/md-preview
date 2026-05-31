@@ -79,6 +79,10 @@ closes with it (chrome `--app=` mode) or shows a "server stopped" notice.
 | Left / Right      | `h` / `l` | `h` / `i` |
 | Half-page down/up | `d` / `u` | `d` / `u` |
 | Top / Bottom      | `g` / `G` | `g` / `G` |
+| History back      | `H`       | `H`       |
+| History forward   | `L`       | `I`       |
+| File tree sidebar | `Tab`     | `Tab`     |
+| Fuzzy file finder | `Ctrl+P`  | `Ctrl+P`  |
 | Reload (static)   | `r`       | `r`       |
 | Close             | `q`       | `q`       |
 
