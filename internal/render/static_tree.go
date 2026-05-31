@@ -14,8 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 
+	"github.com/aldevv/md-preview/internal/osutil"
 	"github.com/aldevv/md-preview/internal/render/pandoc"
 )
 
@@ -405,7 +405,7 @@ func pathInsideDir(cleanPath, dir string) bool {
 // O_NOFOLLOW defends against a shared-tmp symlink attack aiming our
 // write at a foreign file.
 func writeStaticTmpFile(path string, data []byte) error {
-	flags := os.O_WRONLY | os.O_CREATE | os.O_TRUNC | syscall.O_NOFOLLOW
+	flags := os.O_WRONLY | os.O_CREATE | os.O_TRUNC | osutil.ONoFollow
 	f, err := os.OpenFile(path, flags, 0o600)
 	if err != nil {
 		return err

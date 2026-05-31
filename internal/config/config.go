@@ -20,14 +20,22 @@ import (
 // Config is the parsed TOML config. Fields use zero values / nil pointers to
 // distinguish "unset" from explicitly-set values where it matters.
 type Config struct {
-	Theme     string   `toml:"theme"`
-	FontSize  *float64 `toml:"font_size"`
-	CustomCSS string   `toml:"custom_css"`
-	Browser   any      `toml:"browser"`
-	Edit      bool     `toml:"edit"`
-	Colemak   bool     `toml:"colemak"`
-	FileTree    bool `toml:"file_tree"`
-	FuzzyFinder bool `toml:"fuzzy_finder"`
+	Theme       string   `toml:"theme"`
+	FontSize    *float64 `toml:"font_size"`
+	CustomCSS   string   `toml:"custom_css"`
+	Browser     any      `toml:"browser"`
+	Edit        bool     `toml:"edit"`
+	Colemak     bool     `toml:"colemak"`
+	FileTree    bool     `toml:"file_tree"`
+	FuzzyFinder bool     `toml:"fuzzy_finder"`
+	// PreferRunningBrowser: when true (default) and the user hasn't
+	// pinned a browser, mdp skips the native window if a chromium-
+	// family browser process is already running and routes the
+	// preview to it via --app=. The warm browser opens a new window
+	// in ~50-100ms vs. WebKit2GTK cold start of ~800-900ms. Set to
+	// false (or MDP_NO_BROWSER_REUSE=1) to always go through the
+	// native → browser fallback.
+	PreferRunningBrowser *bool `toml:"prefer_running_browser"`
 }
 
 // Path returns the resolved config file path, honoring XDG_CONFIG_HOME and
@@ -57,6 +65,7 @@ const defaultConfigTemplate = `# md-preview config: uncomment any line to overri
 # colemak    = false            # swap in-page nav keys j/k/l → n/e/i
 # file_tree    = true           # Tab toggles a sidebar listing previewable files
 # fuzzy_finder = true           # Ctrl+P opens a fuzzy file finder
+# prefer_running_browser = true # if a chromium-family browser is already running, route the preview to it (faster than cold-starting the native window)
 `
 
 // EnsureDefault writes a commented default config file to Path() when one
@@ -182,6 +191,151 @@ func BrowserCmd(browser any, url string, lookPath func(string) (string, error), 
 	}
 }
 
+// runningChromiumComms maps the /proc/PID/comm string (truncated to
+// TASK_COMM_LEN-1 = 15 chars) to the user-friendly launcher binary we
+// look up on PATH. The /proc/PID/exe symlink usually resolves directly
+// to the binary but the snap chromium wrapper and a few distros put
+// the running process at a different path than the PATH entry, so we
+// keep the PATH fallback.
+var runningChromiumComms = map[string]string{
+	"chrome":            "google-chrome",
+	"chrome-stable":     "google-chrome-stable",
+	"google-chrome":     "google-chrome",
+	"chromium":          "chromium",
+	"chromium-bro":      "chromium-browser",
+	"chromium-browser":  "chromium-browser",
+	"brave":             "brave-browser",
+	"brave-browser":     "brave-browser",
+	"msedge":            "microsoft-edge",
+	"microsoft-edge":    "microsoft-edge",
+	"vivaldi-bin":       "vivaldi",
+	"vivaldi-stable":    "vivaldi-stable",
+}
+
+// runningChromiumDarwinBasenames maps the basename of `ps -A -o comm=`
+// output to itself; values exist so map presence checks are O(1).
+// Helper processes (GPU/Renderer/Plugin) are filtered separately.
+var runningChromiumDarwinBasenames = map[string]bool{
+	"Google Chrome":        true,
+	"Google Chrome Beta":   true,
+	"Google Chrome Canary": true,
+	"Chromium":             true,
+	"Brave Browser":        true,
+	"Brave Browser Beta":   true,
+	"Microsoft Edge":       true,
+	"Microsoft Edge Beta":  true,
+	"Vivaldi":              true,
+}
+
+// runningChromiumWindowsImages maps tasklist image names to the PATH
+// launcher we resolve back via lookPath. tasklist only prints the
+// image filename (e.g. "chrome.exe"), not the path, so we go through
+// LookPath to get something we can argv-spawn.
+var runningChromiumWindowsImages = map[string]string{
+	"chrome.exe":   "chrome",
+	"chromium.exe": "chromium",
+	"brave.exe":    "brave",
+	"msedge.exe":   "msedge",
+	"vivaldi.exe":  "vivaldi",
+}
+
+// RunningChromiumBin returns the executable path of a chromium-family
+// browser process detected as running, or "" when none is found.
+// Linux scans /proc/PID/comm; darwin runs `ps -A -o comm=`; windows
+// runs `tasklist /FO CSV /NH` and resolves the matching .exe via
+// PATH.
+func RunningChromiumBin(lookPath func(string) (string, error), goos string) string {
+	switch goos {
+	case "linux":
+		return runningChromiumLinux(lookPath)
+	case "darwin":
+		return runningChromiumDarwin()
+	case "windows":
+		return runningChromiumWindows(lookPath)
+	}
+	return ""
+}
+
+func runningChromiumLinux(lookPath func(string) (string, error)) string {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if name == "" || name[0] < '0' || name[0] > '9' {
+			continue
+		}
+		data, err := os.ReadFile("/proc/" + name + "/comm")
+		if err != nil {
+			continue
+		}
+		comm := strings.TrimSpace(string(data))
+		launcher, ok := runningChromiumComms[comm]
+		if !ok {
+			continue
+		}
+		if exe, err := os.Readlink("/proc/" + name + "/exe"); err == nil && exe != "" {
+			return exe
+		}
+		if p, err := lookPath(launcher); err == nil && p != "" {
+			return p
+		}
+	}
+	return ""
+}
+
+func runningChromiumDarwin() string {
+	out, err := exec.Command("ps", "-A", "-o", "comm=").Output()
+	if err != nil {
+		return ""
+	}
+	for raw := range strings.SplitSeq(string(out), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		base := filepath.Base(line)
+		// Skip helper processes (Google Chrome Helper, Chromium Helper
+		// (GPU), etc.) so the launchable main bundle binary wins.
+		if strings.Contains(base, " Helper") {
+			continue
+		}
+		if runningChromiumDarwinBasenames[base] {
+			return line
+		}
+	}
+	return ""
+}
+
+func runningChromiumWindows(lookPath func(string) (string, error)) string {
+	// tasklist CSV with no header. First field is the image name in
+	// quotes: "chrome.exe","1234",...
+	out, err := exec.Command("tasklist", "/FO", "CSV", "/NH").Output()
+	if err != nil {
+		return ""
+	}
+	for raw := range strings.SplitSeq(string(out), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || line[0] != '"' {
+			continue
+		}
+		end := strings.Index(line[1:], `"`)
+		if end < 0 {
+			continue
+		}
+		image := strings.ToLower(line[1 : 1+end])
+		launcher, ok := runningChromiumWindowsImages[image]
+		if !ok {
+			continue
+		}
+		if p, err := lookPath(launcher); err == nil && p != "" {
+			return p
+		}
+	}
+	return ""
+}
+
 // IsChromiumApp returns true when argv launches a chromium-family browser
 // in --app= mode (the chromeless single-window UX the native fallback is
 // trying to approximate). False for Firefox-family, xdg-open/open
@@ -252,6 +406,13 @@ func autoBrowserCmd(url string, lookPath func(string) (string, error), goos stri
 			}
 		}
 	}
+	if goos == "windows" {
+		for _, p := range autoWindowsAppPaths {
+			if _, err := lookPath(p); err == nil {
+				return []string{p, "--app=" + url}
+			}
+		}
+	}
 	for _, fam := range autoBrowserFamilies {
 		for _, name := range fam.bins {
 			if p, err := lookPath(name); err == nil && p != "" {
@@ -259,10 +420,36 @@ func autoBrowserCmd(url string, lookPath func(string) (string, error), goos stri
 			}
 		}
 	}
-	if goos == "darwin" {
+	switch goos {
+	case "darwin":
 		return []string{"open", url}
+	case "windows":
+		// `start ""` opens url with the system-registered handler.
+		// The empty "" is the window title (start treats the first
+		// quoted arg as title), required so a URL with spaces doesn't
+		// get misparsed.
+		return []string{"cmd", "/c", "start", "", url}
 	}
 	return []string{"xdg-open", url}
+}
+
+// autoWindowsAppPaths: chromium browsers on Windows install under
+// Program Files with stable layouts, but are usually not on PATH. Go's
+// exec.LookPath on Windows also consults the "App Paths" registry key
+// (where these installers register themselves), so a bare bin name in
+// autoBrowserFamilies covers most setups, but probe these explicitly
+// first to keep --app= mode preferred over a firefox shim that happens
+// to live on PATH.
+var autoWindowsAppPaths = []string{
+	`C:\Program Files\Google\Chrome\Application\chrome.exe`,
+	`C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`,
+	`C:\Program Files\Chromium\Application\chrome.exe`,
+	`C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe`,
+	`C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe`,
+	`C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`,
+	`C:\Program Files\Microsoft\Edge\Application\msedge.exe`,
+	`C:\Program Files\Vivaldi\Application\vivaldi.exe`,
+	`C:\Program Files (x86)\Vivaldi\Application\vivaldi.exe`,
 }
 
 // FzfPick pipes a list of markdown files (cwd, recursive) into fzf and

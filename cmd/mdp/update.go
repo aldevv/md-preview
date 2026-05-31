@@ -18,8 +18,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/aldevv/md-preview/internal/osutil"
 )
 
 const (
@@ -264,7 +265,7 @@ func extractMDPBinary(r io.Reader, tmp, dest string) error {
 // (same defense as writeTmpFile in main.go). LimitReader caps a hostile
 // gzip's decompressed output.
 func writeBinaryTo(r io.Reader, tmp string, mode os.FileMode) error {
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|syscall.O_NOFOLLOW, mode)
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|osutil.ONoFollow, mode)
 	if err != nil {
 		return err
 	}

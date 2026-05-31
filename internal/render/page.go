@@ -574,6 +574,34 @@ const pageTemplate = `<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__TITLE__</title>
+<script>
+// Page-side timing markers. Visible in DevTools (Ctrl+Shift+I when
+// MDP_DEBUG=1) and surfaced into document.title prefix in debug mode.
+window.__mdpT0 = performance.now();
+window.__mdpMark = function (label) {
+  var t = (performance.now() - window.__mdpT0).toFixed(1);
+  console.log('[mdp-time] page: ' + label + ' ' + t + 'ms');
+};
+window.__mdpMark('parse start');
+document.addEventListener('readystatechange', function () {
+  window.__mdpMark('readyState=' + document.readyState);
+});
+document.addEventListener('DOMContentLoaded', function () {
+  window.__mdpMark('DOMContentLoaded');
+});
+window.addEventListener('load', function () {
+  window.__mdpMark('window load');
+});
+if (typeof PerformanceObserver === 'function') {
+  try {
+    new PerformanceObserver(function (list) {
+      for (var entry of list.getEntries()) {
+        window.__mdpMark(entry.name + ' (paint)');
+      }
+    }).observe({ type: 'paint', buffered: true });
+  } catch (_) {}
+}
+</script>
 <style>
 __HLJS_THEME_CSS__
 __CSS_VARS__
@@ -744,10 +772,14 @@ document.addEventListener('click', (e) => {
   e.preventDefault();
   window.open(href, '_blank', 'noopener,noreferrer');
 });
+window.__mdpMark && window.__mdpMark('before hljs script');
 __HLJS_SCRIPT__
+window.__mdpMark && window.__mdpMark('after hljs script');
 __HLJS_HIGHLIGHT_CALL__
+window.__mdpMark && window.__mdpMark('after hljs highlight');
 __KATEX_SCRIPT__
 __KATEX_AUTORENDER_SCRIPT__
+window.__mdpMark && window.__mdpMark('after katex scripts');
 function mdpRenderMath() {
   if (typeof renderMathInElement !== "function") return;
   renderMathInElement(document.querySelector("#content"), {
@@ -761,8 +793,10 @@ function mdpRenderMath() {
 }
 window.mdpRenderMath = mdpRenderMath;
 mdpRenderMath();
+window.__mdpMark && window.__mdpMark('after katex render');
 __MERMAID_SCRIPT__
 __MERMAID_INIT__
+window.__mdpMark && window.__mdpMark('after mermaid init');
 __VIM_KEYS__
 __SHARED_NAV_SCRIPT__
 __TREE_SCRIPT__
@@ -782,6 +816,12 @@ __WS_SCRIPT__
 // (only meaningful when at least one of fileTree/fuzzyFinder is on);
 // empty in WS mode (the page fetches /tree on demand).
 func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, currentFile string, fileTree, fuzzyFinder bool, staticTreeJSON string) string {
+	// Make every <img> async + lazy so external image fetches
+	// (shields.io badges, remote screenshots, etc.) don't block
+	// first-contentful-paint. Measured ~500ms cold-start improvement
+	// on READMEs with a single shields.io badge.
+	body = MarkImagesAsync(body)
+
 	cssVars := CSSDark
 	hljsThemeCSS := hljsThemeDarkCSS
 	if theme == "light" {

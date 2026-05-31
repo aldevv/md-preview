@@ -7,6 +7,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
@@ -20,11 +21,11 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/aldevv/md-preview/internal/config"
 	"github.com/aldevv/md-preview/internal/nativewin"
+	"github.com/aldevv/md-preview/internal/osutil"
 	"github.com/aldevv/md-preview/internal/render"
 	"github.com/aldevv/md-preview/internal/render/pandoc"
 	"github.com/aldevv/md-preview/internal/server"
@@ -61,6 +62,14 @@ type Environment struct {
 	// platform has no backend or required runtime libraries are missing.
 	// Callers should fall back to Spawn on ErrUnsupported.
 	OpenWindow func(url string) error
+	// StartWindowChild spawns the current binary as a detached
+	// `mdp __window -` child with stdin connected to the returned
+	// writer. The caller writes the URL (one line) when rendering is
+	// done, then closes the writer; the child blocks reading the URL
+	// in parallel with the parent's render. Returns an error when
+	// native is unavailable or the spawn fails; callers fall back to
+	// the synchronous OpenWindow / browser path.
+	StartWindowChild func() (io.WriteCloser, error)
 }
 
 func realEnv() Environment {
@@ -74,13 +83,57 @@ func realEnv() Environment {
 		FzfPick:    config.FzfPick,
 		LoadConfig: config.Load,
 		Spawn:      spawnDetached,
-		Exec:       syscall.Exec,
+		Exec:       osutil.ReplaceProcess,
 		RunServer:  server.Run,
-		Executable: os.Executable,
-		HTTPGet:    httpGet,
-		RunCmd:     runCmdInherit,
-		OpenWindow: openNativeWindow,
+		Executable:       os.Executable,
+		HTTPGet:          httpGet,
+		RunCmd:           runCmdInherit,
+		OpenWindow:       openNativeWindow,
+		StartWindowChild: startWindowChildDetached,
 	}
+}
+
+// startWindowChildDetached spawns the current binary as `mdp __window -`
+// with stdin piped, Setsid for detachment. The caller writes the URL
+// later. Returns ErrUnsupported when nativewin isn't loadable so the
+// caller can drop straight to the browser path.
+//
+// In MDP_DEBUG=1 the child's stderr is appended to
+// $MDP_DEBUG_LOG (default /tmp/mdp-debug.log) so the [mdp-time]
+// markers survive Setsid detachment; tail that file to watch the
+// child boot.
+func startWindowChildDetached() (io.WriteCloser, error) {
+	if !nativewin.Available() {
+		return nil, nativewin.ErrUnsupported
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(exe, "__window", "-")
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	if os.Getenv("MDP_DEBUG") == "1" {
+		path := os.Getenv("MDP_DEBUG_LOG")
+		if path == "" {
+			path = "/tmp/mdp-debug.log"
+		}
+		if f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
+			_, _ = fmt.Fprintf(f, "\n=== mdp child %s ===\n", time.Now().Format(time.RFC3339Nano))
+			cmd.Stderr = f
+			cmd.Stdout = f
+		}
+	}
+	stdinPipe, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	cmd.SysProcAttr = osutil.DetachAttr()
+	if err := cmd.Start(); err != nil {
+		_ = stdinPipe.Close()
+		return nil, err
+	}
+	return stdinPipe, nil
 }
 
 // Probes Available() lazily; the Linux probe dlopens libgtk/libwebkit,
@@ -150,6 +203,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, env Environme
 			return runSkill(args[1:], stdout, stderr, env)
 		case "update":
 			return runUpdate(args[1:], stdout, stderr, env)
+		case "__window":
+			return runWindow(args[1:], stderr, env)
 		case "help":
 			fmt.Fprint(stdout, usage)
 			return 0
@@ -174,19 +229,81 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, env Environme
 		return code
 	}
 
+	parentMark := newParentTimer()
+	parentMark("after parseRunFlags + resolveAndValidate")
+
+	// Check if a chromium-family browser is already running. If so,
+	// it's cheaper to open --app= in the warm browser (~50-100ms) than
+	// to cold-start the native WebKit window (~800-900ms). Honors
+	// PreferRunningBrowser config + MDP_NO_BROWSER_REUSE env override,
+	// and only kicks in for the auto browser default (a user-pinned
+	// browser config is respected as-is).
+	runningChromium := ""
+	if !flags.printPath && wantPreferRunningBrowser(rc.cfg) && isAutoBrowser(rc.cfg.Browser) {
+		runningChromium = config.RunningChromiumBin(env.LookPath, env.GOOS)
+		if runningChromium != "" {
+			parentMark("found running chromium: " + runningChromium)
+		}
+	}
+
+	// Pre-spawn the native-window child (if we're going that route) so
+	// its Go runtime + GTK + WebKit init overlaps with our markdown
+	// render. We send the URL down stdin once the render finishes.
+	// On abort (render error, -p print mode), close the pipe and the
+	// child exits silently on EOF. Skipped entirely when we already
+	// know a warm chromium browser is going to handle the preview.
+	var childStdin io.WriteCloser
+	if runningChromium == "" && !flags.printPath && wantNative() && env.StartWindowChild != nil {
+		if pipe, err := env.StartWindowChild(); err == nil {
+			childStdin = pipe
+			parentMark("StartWindowChild spawned")
+		} else if err != nativewin.ErrUnsupported {
+			fmt.Fprintf(stderr, "mdp: window child unavailable (%v); falling back to inline/browser\n", err)
+		}
+	}
+
 	tmpPath, ok := renderEntry(rc, env, stderr)
+	parentMark("renderEntry done")
 	if !ok {
+		if childStdin != nil {
+			_ = childStdin.Close()
+		}
 		return 1
 	}
 
 	if flags.printPath {
+		if childStdin != nil {
+			_ = childStdin.Close()
+		}
 		fmt.Fprintln(stdout, tmpPath)
 		return 0
 	}
 
 	url := "file://" + tmpPath
-	if !openPreview(url, rc.cfg, env, stderr) {
-		return 1
+	switch {
+	case runningChromium != "":
+		argv := []string{runningChromium, "--app=" + url}
+		if err := env.Spawn(argv); err != nil {
+			fmt.Fprintf(stderr, "mdp: launching running browser: %v\n", err)
+			if !openPreview(url, rc.cfg, env, stderr) {
+				return 1
+			}
+		}
+		parentMark("running chromium spawned")
+	case childStdin != nil:
+		_, werr := fmt.Fprintln(childStdin, url)
+		_ = childStdin.Close()
+		parentMark("URL written to child stdin")
+		if werr != nil {
+			fmt.Fprintf(stderr, "mdp: sending URL to window child: %v\n", werr)
+			if !openPreview(url, rc.cfg, env, stderr) {
+				return 1
+			}
+		}
+	default:
+		if !openPreview(url, rc.cfg, env, stderr) {
+			return 1
+		}
 	}
 
 	if !flags.editEnabled(rc.cfg) {
@@ -195,10 +312,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, env Environme
 	return maybeOpenEditor(rc.src, env, stderr)
 }
 
-// openPreview opens url in the native window when available (and not
-// disabled via MDP_NATIVE=0), otherwise spawns the configured browser.
-// On non-chromium fallback we append #mdp-install-chrome so the page
-// surfaces the install banner the first time. Returns false on error.
+// openPreview is the fallback path used when the parallel
+// StartWindowChild route in run() couldn't be taken (native disabled,
+// runtime unavailable, or spawn failed). It tries inline OpenWindow
+// (blocks until the window closes), then falls back to a browser
+// spawn with the #mdp-install-chrome hash appended for non-chromium
+// fallback launches.
 func openPreview(url string, cfg config.Config, env Environment, stderr io.Writer) bool {
 	if wantNative() && env.OpenWindow != nil {
 		if err := env.OpenWindow(url); err == nil {
@@ -218,6 +337,39 @@ func openPreview(url string, cfg config.Config, env Environment, stderr io.Write
 	return true
 }
 
+// runWindow is the hidden subcommand the parent invokes (detached) to
+// hold the native window. Pass "-" to read the URL from stdin (used by
+// the parallel-render path so the child can start WebKit init while
+// the parent finishes rendering). Not documented in usage by design.
+func runWindow(args []string, stderr io.Writer, env Environment) int {
+	if len(args) < 1 {
+		fmt.Fprintln(stderr, "Usage: mdp __window <url|->")
+		return 1
+	}
+	url := args[0]
+	if url == "-" {
+		sc := bufio.NewScanner(os.Stdin)
+		if !sc.Scan() {
+			fmt.Fprintln(stderr, "mdp __window: no URL on stdin")
+			return 1
+		}
+		url = strings.TrimSpace(sc.Text())
+		if url == "" {
+			fmt.Fprintln(stderr, "mdp __window: empty URL")
+			return 1
+		}
+	}
+	if env.OpenWindow == nil {
+		fmt.Fprintln(stderr, "mdp __window: native window not supported on this build")
+		return 1
+	}
+	if err := env.OpenWindow(url); err != nil {
+		fmt.Fprintf(stderr, "mdp __window: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
 // withInstallHash returns a copy of argv with #mdp-install-chrome
 // appended to the URL (the last element of argv per BrowserCmd's
 // convention).
@@ -234,12 +386,52 @@ func withInstallHash(argv []string) []string {
 	return out
 }
 
+// newParentTimer returns a marker function that prints elapsed time
+// from now whenever MDP_DEBUG=1 is set. Matches the [mdp-time] prefix
+// used by the nativewin backend so timings line up. No-op otherwise.
+func newParentTimer() func(label string) {
+	if os.Getenv("MDP_DEBUG") != "1" {
+		return func(string) {}
+	}
+	t0 := time.Now()
+	return func(label string) {
+		fmt.Fprintf(os.Stderr, "[mdp-time] parent: %-34s %v\n", label, time.Since(t0))
+	}
+}
+
 // wantNative returns false only when MDP_NATIVE is explicitly disabled
 // (0/false). The native window is the default; the env var is the
 // opt-out.
 func wantNative() bool {
 	v := os.Getenv("MDP_NATIVE")
 	return v != "0" && v != "false"
+}
+
+// wantPreferRunningBrowser is the "if a chromium browser is already
+// running, send the preview there" toggle. Defaults to true. The env
+// var MDP_NO_BROWSER_REUSE=1 forces false; the config flag overrides
+// the default when set.
+func wantPreferRunningBrowser(cfg config.Config) bool {
+	if v := os.Getenv("MDP_NO_BROWSER_REUSE"); v == "1" || v == "true" {
+		return false
+	}
+	if cfg.PreferRunningBrowser != nil {
+		return *cfg.PreferRunningBrowser
+	}
+	return true
+}
+
+// isAutoBrowser reports whether cfg.Browser is unset / "auto", i.e. we
+// own the browser-choice decision. When the user has pinned a specific
+// browser we honor it as-is and skip the running-chromium shortcut.
+func isAutoBrowser(b any) bool {
+	switch v := b.(type) {
+	case nil:
+		return true
+	case string:
+		return v == "" || v == "auto"
+	}
+	return false
 }
 
 type runFlags struct {
@@ -480,7 +672,7 @@ func pruneStaleTmpFiles(tmpdir string, stderr io.Writer) {
 // to a foreign-user-planted symlink redirecting our truncate to e.g.
 // ~/.bashrc; ELOOP makes the open fail cleanly in that case.
 func writeTmpFile(path string, data []byte) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|osutil.ONoFollow, 0o600)
 	if err != nil {
 		return err
 	}
@@ -514,7 +706,7 @@ func spawnDetached(argv []string) error {
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	cmd.Stdin = nil
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.SysProcAttr = osutil.DetachAttr()
 	return cmd.Start()
 }
 

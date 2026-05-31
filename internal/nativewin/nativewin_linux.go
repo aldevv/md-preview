@@ -10,14 +10,21 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
 )
 
 const (
-	gtkWindowToplevel                = 0
+	gtkWindowToplevel = 0
+	// WebKitHardwareAccelerationPolicy. ALWAYS forces GPU compositor
+	// setup on every Open(); on a cold start that adds ~300-500ms to
+	// first-contentful-paint per measurements. NEVER uses the software
+	// renderer which is plenty fast for our markdown viewport and
+	// gets text on screen sooner.
 	webkitHardwareAccelerationAlways = 0
+	webkitHardwareAccelerationNever  = 1
 	webkitCacheModelWebBrowser       = 2
 	// WebKitLoadEvent enum (webkit2/WebKitLoadEvent).
 	webkitLoadStarted    = 0
@@ -56,8 +63,10 @@ var (
 	webkitWebViewSetBackgroundColor             func(view uintptr, rgba uintptr)
 	webkitSettingsSetHardwareAccelerationPolicy func(settings uintptr, policy int32)
 	webkitSettingsSetEnableSmoothScrolling      func(settings uintptr, enabled int32)
+	webkitSettingsSetEnableDeveloperExtras      func(settings uintptr, enabled int32)
 	webkitWebContextSetCacheModel               func(ctx uintptr, model int32)
 	gSignalConnectData                          func(instance uintptr, signal string, handler uintptr, data uintptr, destroyData uintptr, flags int32) uint64
+	gTimeoutAddFull                             func(priority int32, interval uint32, function uintptr, data uintptr, notify uintptr) uint32
 
 	availOnce sync.Once
 	availOK   bool
@@ -77,6 +86,10 @@ func dlopenWebKit(mode int) (uintptr, string, error) {
 
 func dlopenAll() error {
 	mode := purego.RTLD_NOW | purego.RTLD_GLOBAL
+	libglib, err := purego.Dlopen("libglib-2.0.so.0", mode)
+	if err != nil {
+		return fmt.Errorf("dlopen libglib-2.0: %w", err)
+	}
 	libgobject, err := purego.Dlopen("libgobject-2.0.so.0", mode)
 	if err != nil {
 		return fmt.Errorf("dlopen libgobject-2.0: %w", err)
@@ -105,8 +118,10 @@ func dlopenAll() error {
 	purego.RegisterLibFunc(&webkitWebViewSetBackgroundColor, libwebkit, "webkit_web_view_set_background_color")
 	purego.RegisterLibFunc(&webkitSettingsSetHardwareAccelerationPolicy, libwebkit, "webkit_settings_set_hardware_acceleration_policy")
 	purego.RegisterLibFunc(&webkitSettingsSetEnableSmoothScrolling, libwebkit, "webkit_settings_set_enable_smooth_scrolling")
+	purego.RegisterLibFunc(&webkitSettingsSetEnableDeveloperExtras, libwebkit, "webkit_settings_set_enable_developer_extras")
 	purego.RegisterLibFunc(&webkitWebContextSetCacheModel, libwebkit, "webkit_web_context_set_cache_model")
 	purego.RegisterLibFunc(&gSignalConnectData, libgobject, "g_signal_connect_data")
+	purego.RegisterLibFunc(&gTimeoutAddFull, libglib, "g_timeout_add_full")
 	return nil
 }
 
@@ -194,8 +209,17 @@ func Open(opts Options) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
+	debug := os.Getenv("MDP_DEBUG") == "1"
+	t0 := time.Now()
+	mark := func(label string) {
+		if debug {
+			fmt.Fprintf(os.Stderr, "[mdp-time] %-22s %v\n", label, time.Since(t0))
+		}
+	}
+
 	restore := filterWebKitStderr()
 	defer restore()
+	mark("after stderr filter")
 
 	// Speeds up JSC JIT tier-up; noticeable on the wasm cold path.
 	_ = os.Setenv("JSC_jitPolicyScale", "0.1")
@@ -208,8 +232,16 @@ func Open(opts Options) error {
 	// reserved, so 35 is a safe slot.
 	_ = os.Unsetenv("JSC_signalForGC")
 	_ = os.Setenv("JSC_SIGNAL_FOR_GC", "35")
+	// Skip the bubblewrap/seccomp sandbox setup on Web Process spawn.
+	// We render local file:// markdown previews; the sandbox is part
+	// of the ~100-150ms cost between load_uri and LOAD_STARTED. Set
+	// only if the user hasn't pinned it themselves.
+	if os.Getenv("WEBKIT_FORCE_SANDBOX") == "" {
+		_ = os.Setenv("WEBKIT_FORCE_SANDBOX", "0")
+	}
 
 	loadOnce.Do(func() { loadErr = dlopenAll() })
+	mark("loadOnce.Do (dlopen)")
 	if loadErr != nil {
 		return ErrUnsupported
 	}
@@ -218,19 +250,33 @@ func Open(opts Options) error {
 	if gtkInitCheck(&argc, nil) == 0 {
 		return fmt.Errorf("nativewin: gtk_init_check failed (no display?)")
 	}
+	mark("gtk_init_check")
 
 	window := gtkWindowNew(gtkWindowToplevel)
 	gtkWindowSetTitle(window, opts.titleOrDefault())
 	gtkWindowSetDefSize(window, int32(opts.widthOrDefault()), int32(opts.heightOrDefault()))
+	mark("gtk_window_new")
 
 	view := webkitWebViewNew()
+	mark("webkit_web_view_new")
 	gtkContainerAdd(window, view)
 
 	settings := webkitWebViewGetSettings(view)
+	// ALWAYS gets the earliest first-contentful-paint in WebKit2GTK
+	// despite the name: the software renderer (NEVER) ties FCP to the
+	// window-load event because it paints only after subresources
+	// resolve. Compositor-backed ALWAYS paints text as soon as layout
+	// is ready, regardless of pending image fetches.
 	webkitSettingsSetHardwareAccelerationPolicy(settings, webkitHardwareAccelerationAlways)
 	webkitSettingsSetEnableSmoothScrolling(settings, 0)
+	if debug {
+		// Right-click → Inspect Element opens DevTools so the user can
+		// read the JS-side timeline (performance panel, console.log).
+		webkitSettingsSetEnableDeveloperExtras(settings, 1)
+	}
 
 	webkitWebContextSetCacheModel(webkitWebViewGetContext(view), webkitCacheModelWebBrowser)
+	mark("webkit settings done")
 
 	// Paint the WebKit viewport with the GitHub-dark background before
 	// the first frame so the window doesn't flash white during the
@@ -238,22 +284,44 @@ func Open(opts Options) error {
 	bg := gdkRGBA{Red: 13.0 / 255, Green: 17.0 / 255, Blue: 23.0 / 255, Alpha: 1.0}
 	webkitWebViewSetBackgroundColor(view, uintptr(unsafe.Pointer(&bg)))
 
-	// Defer the window show until WebKit reports the first byte
-	// committed so the user doesn't see GTK's white pre-paint nor the
-	// brief WebKit blank frame before the page lands. file:// loads
-	// commit in single-digit ms; if the page never commits (broken
-	// URL) the window stays hidden, which is the correct signal.
+	// Defer the window show until WebKit fires LOAD_FINISHED so the
+	// window appears with content already painted rather than as a
+	// dark rectangle waiting on first-contentful-paint. FCP in
+	// WebKit2GTK lands ~600ms after LOAD_COMMITTED on cold start; the
+	// LOAD_FINISHED signal is the closest WebKit-exposed proxy. As a
+	// safety net, a 1500ms timer also shows the window in case a
+	// broken URL means LOAD_FINISHED never fires. WEBKIT_LOAD_FINISHED
+	// event value is 3.
 	shown := false
+	showOnce := func(reason string) {
+		if shown {
+			return
+		}
+		shown = true
+		gtkWidgetShowAll(window)
+		mark(fmt.Sprintf("gtk_widget_show_all (%s)", reason))
+	}
 	loadCB := purego.NewCallback(func(_view, event, _data uintptr) uintptr {
-		if !shown && event == webkitLoadCommitted {
-			gtkWidgetShowAll(window)
-			shown = true
+		if debug {
+			mark(fmt.Sprintf("load-changed event=%d", event))
+		}
+		if event == webkitLoadFinished {
+			showOnce("LOAD_FINISHED")
 		}
 		return 0
 	})
 	gSignalConnectData(view, "load-changed", loadCB, 0, 0, 0)
+	// Safety net: if the load stalls or the signal never fires, show
+	// the window anyway after 1.5s rather than leaving the user with
+	// nothing.
+	timeoutCB := purego.NewCallback(func(_data uintptr) uintptr {
+		showOnce("timeout")
+		return 0 // G_SOURCE_REMOVE
+	})
+	gTimeoutAddFull(0, 1500, timeoutCB, 0, 0)
 
 	webkitWebViewLoadURI(view, opts.URL)
+	mark("webkit_web_view_load_uri")
 
 	destroyCB := purego.NewCallback(func(_ uintptr, _ uintptr) uintptr {
 		gtkMainQuit()
