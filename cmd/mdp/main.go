@@ -74,17 +74,17 @@ type Environment struct {
 
 func realEnv() Environment {
 	return Environment{
-		LookPath:   exec.LookPath,
-		GOOS:       runtime.GOOS,
-		GOARCH:     runtime.GOARCH,
-		Stat:       os.Stat,
-		TempDir:    os.TempDir,
-		Getwd:      func() (string, error) { return os.Getwd() },
-		FzfPick:    config.FzfPick,
-		LoadConfig: config.Load,
-		Spawn:      spawnDetached,
-		Exec:       osutil.ReplaceProcess,
-		RunServer:  server.Run,
+		LookPath:         exec.LookPath,
+		GOOS:             runtime.GOOS,
+		GOARCH:           runtime.GOARCH,
+		Stat:             os.Stat,
+		TempDir:          os.TempDir,
+		Getwd:            func() (string, error) { return os.Getwd() },
+		FzfPick:          config.FzfPick,
+		LoadConfig:       config.Load,
+		Spawn:            spawnDetached,
+		Exec:             osutil.ReplaceProcess,
+		RunServer:        server.Run,
 		Executable:       os.Executable,
 		HTTPGet:          httpGet,
 		RunCmd:           runCmdInherit,
@@ -578,11 +578,12 @@ func renderEntry(rc resolved, env Environment, stderr io.Writer) (string, bool) 
 
 func renderEntryAsStaticTree(rc resolved, env Environment, stderr io.Writer) (string, bool) {
 	opts := render.StaticTreeOptions{
-		Theme:    rc.theme,
-		ExtraCSS: config.ExtraCSS(rc.cfg, stderr),
-		Colemak:  rc.cfg.Colemak,
-		FileTree: rc.cfg.FileTree,
+		Theme:       rc.theme,
+		ExtraCSS:    config.ExtraCSS(rc.cfg, stderr),
+		Colemak:     rc.cfg.Colemak,
+		FileTree:    rc.cfg.FileTree,
 		FuzzyFinder: rc.cfg.FuzzyFinder,
+		Keys:        rc.cfg.Keys,
 	}
 	entryHTML, err := render.RenderStaticTree(rc.src, env.TempDir(), opts)
 	if err != nil {
@@ -606,7 +607,7 @@ func renderEntryAsSingleFile(rc resolved, env Environment, stderr io.Writer) (st
 		}
 		return render.FileURL(abs), true
 	})
-	page := render.BuildPage(body, rc.theme, 0, config.ExtraCSS(rc.cfg, stderr), rc.cfg.Colemak, rc.src, false, false, "")
+	page := render.BuildPageWithKeys(body, rc.theme, 0, config.ExtraCSS(rc.cfg, stderr), rc.cfg.Colemak, rc.src, false, false, "", rc.cfg.Keys)
 	tmpPath := tmpHTMLPath(env.TempDir(), rc.src)
 	if err := writeTmpFile(tmpPath, []byte(page)); err != nil {
 		fmt.Fprintf(stderr, "mdp: writing tmp: %v\n", err)
@@ -743,14 +744,15 @@ func runWatchSubcommand(args []string, stdout, stderr io.Writer, env Environment
 	}
 
 	opts := server.Options{
-		File:     rc.src,
-		Port:     0,
-		Theme:    rc.theme,
-		Colemak:  rc.cfg.Colemak,
-		FileTree: rc.cfg.FileTree,
+		File:        rc.src,
+		Port:        0,
+		Theme:       rc.theme,
+		Colemak:     rc.cfg.Colemak,
+		FileTree:    rc.cfg.FileTree,
 		FuzzyFinder: rc.cfg.FuzzyFinder,
-		Watch:    true,
-		ExtraCSS: config.ExtraCSS(rc.cfg, stderr),
+		Keys:        rc.cfg.Keys,
+		Watch:       true,
+		ExtraCSS:    config.ExtraCSS(rc.cfg, stderr),
 	}
 
 	if wantNative() && env.OpenWindow != nil {
@@ -858,6 +860,7 @@ func runServe(args []string, stdin io.Reader, stderr io.Writer, env Environment)
 		Colemak:     colemak,
 		FileTree:    cfg.FileTree,
 		FuzzyFinder: cfg.FuzzyFinder,
+		Keys:        cfg.Keys,
 		ExtraCSS:    config.ExtraCSS(cfg, stderr),
 	}
 	// Direct-shell invocations (stdin is a TTY) get the native window

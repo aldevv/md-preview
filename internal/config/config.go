@@ -20,14 +20,15 @@ import (
 // Config is the parsed TOML config. Fields use zero values / nil pointers to
 // distinguish "unset" from explicitly-set values where it matters.
 type Config struct {
-	Theme       string   `toml:"theme"`
-	FontSize    *float64 `toml:"font_size"`
-	CustomCSS   string   `toml:"custom_css"`
-	Browser     any      `toml:"browser"`
-	Edit        bool     `toml:"edit"`
-	Colemak     bool     `toml:"colemak"`
-	FileTree    bool     `toml:"file_tree"`
-	FuzzyFinder bool     `toml:"fuzzy_finder"`
+	Theme       string            `toml:"theme"`
+	FontSize    *float64          `toml:"font_size"`
+	CustomCSS   string            `toml:"custom_css"`
+	Browser     any               `toml:"browser"`
+	Edit        bool              `toml:"edit"`
+	Colemak     bool              `toml:"colemak"`
+	FileTree    bool              `toml:"file_tree"`
+	FuzzyFinder bool              `toml:"fuzzy_finder"`
+	Keys        map[string]string `toml:"keys"`
 	// PreferRunningBrowser: when true (default) and the user hasn't
 	// pinned a browser, mdp skips the native window if a chromium-
 	// family browser process is already running and routes the
@@ -66,6 +67,14 @@ const defaultConfigTemplate = `# md-preview config: uncomment any line to overri
 # file_tree    = true           # Tab toggles a sidebar listing previewable files
 # fuzzy_finder = true           # Ctrl+P opens a fuzzy file finder
 # prefer_running_browser = true # if a chromium-family browser is already running, route the preview to it (faster than cold-starting the native window)
+
+# [keys]
+# down = "j"
+# up = "k"
+# left = "h"
+# right = "l"
+# tree_toggle = "Tab"
+# tree_open = "Enter"
 `
 
 // EnsureDefault writes a commented default config file to Path() when one
@@ -198,18 +207,18 @@ func BrowserCmd(browser any, url string, lookPath func(string) (string, error), 
 // the running process at a different path than the PATH entry, so we
 // keep the PATH fallback.
 var runningChromiumComms = map[string]string{
-	"chrome":            "google-chrome",
-	"chrome-stable":     "google-chrome-stable",
-	"google-chrome":     "google-chrome",
-	"chromium":          "chromium",
-	"chromium-bro":      "chromium-browser",
-	"chromium-browser":  "chromium-browser",
-	"brave":             "brave-browser",
-	"brave-browser":     "brave-browser",
-	"msedge":            "microsoft-edge",
-	"microsoft-edge":    "microsoft-edge",
-	"vivaldi-bin":       "vivaldi",
-	"vivaldi-stable":    "vivaldi-stable",
+	"chrome":           "google-chrome",
+	"chrome-stable":    "google-chrome-stable",
+	"google-chrome":    "google-chrome",
+	"chromium":         "chromium",
+	"chromium-bro":     "chromium-browser",
+	"chromium-browser": "chromium-browser",
+	"brave":            "brave-browser",
+	"brave-browser":    "brave-browser",
+	"msedge":           "microsoft-edge",
+	"microsoft-edge":   "microsoft-edge",
+	"vivaldi-bin":      "vivaldi",
+	"vivaldi-stable":   "vivaldi-stable",
 }
 
 // runningChromiumDarwinBasenames maps the basename of `ps -A -o comm=`

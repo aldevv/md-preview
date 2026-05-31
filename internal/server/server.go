@@ -46,6 +46,7 @@ type state struct {
 	colemak         bool
 	fileTree        bool
 	fuzzyFinder     bool
+	keys            map[string]string
 	extraCSS        string
 	eventLog        io.Writer
 	wsClients       map[net.Conn]struct{}
@@ -259,6 +260,7 @@ func (s *state) handleIndex(w http.ResponseWriter, r *http.Request) {
 	colemak := s.colemak
 	fileTree := s.fileTree
 	fuzzyFinder := s.fuzzyFinder
+	keys := s.keys
 	file := s.file
 	fileDir := s.fileDir
 	extraCSS := s.extraCSS
@@ -271,7 +273,7 @@ func (s *state) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return imgURLFor(abs, fileDir)
 	})
 
-	page := render.BuildPage(body, theme, port, extraCSS, colemak, file, fileTree, fuzzyFinder, "")
+	page := render.BuildPageWithKeys(body, theme, port, extraCSS, colemak, file, fileTree, fuzzyFinder, "", keys)
 	encoded := []byte(page)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(len(encoded)))
@@ -597,16 +599,17 @@ func readStdin(s *state, stdin io.Reader, quit func()) {
 // required when Port is 0 (kernel-assigned). EventLog defaults to
 // os.Stdout when nil so the navigate-line stdout contract is preserved.
 type Options struct {
-	File     string
-	Port     int
-	Theme    string
-	Colemak  bool
+	File        string
+	Port        int
+	Theme       string
+	Colemak     bool
 	FileTree    bool
 	FuzzyFinder bool
-	Watch    bool
-	ExtraCSS string
-	EventLog io.Writer
-	OnListen func(port int)
+	Keys        map[string]string
+	Watch       bool
+	ExtraCSS    string
+	EventLog    io.Writer
+	OnListen    func(port int)
 }
 
 // serve leaks the stdin scanner goroutine on ctx-cancel when stdin is
@@ -680,6 +683,7 @@ func Run(opts Options) error {
 	s := newState(opts.File, opts.Port, opts.Theme, opts.Colemak)
 	s.fileTree = opts.FileTree
 	s.fuzzyFinder = opts.FuzzyFinder
+	s.keys = opts.Keys
 	s.extraCSS = opts.ExtraCSS
 	s.eventLog = opts.EventLog
 	return serve(context.Background(), s, os.Stdin, func() { os.Exit(0) }, opts.Watch, opts.OnListen)

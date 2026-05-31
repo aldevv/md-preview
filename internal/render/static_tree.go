@@ -30,11 +30,12 @@ const StaticTreeMaxFiles = 200
 const StaticTreePandocBudget = 25
 
 type StaticTreeOptions struct {
-	Theme    string
-	ExtraCSS string
-	Colemak  bool
+	Theme       string
+	ExtraCSS    string
+	Colemak     bool
 	FileTree    bool
 	FuzzyFinder bool
+	Keys        map[string]string
 	// MaxFiles overrides StaticTreeMaxFiles when nonzero.
 	MaxFiles int
 	// PandocBudget overrides StaticTreePandocBudget when nonzero.
@@ -165,7 +166,7 @@ func RenderStaticTree(entry, tmpDir string, opts StaticTreeOptions) (string, err
 			}
 			return FileURL(resolved), true
 		})
-		page := BuildPage(rewritten, opts.Theme, 0, opts.ExtraCSS, opts.Colemak, src, opts.FileTree, opts.FuzzyFinder, treeJSON)
+		page := BuildPageWithKeys(rewritten, opts.Theme, 0, opts.ExtraCSS, opts.Colemak, src, opts.FileTree, opts.FuzzyFinder, treeJSON, opts.Keys)
 		if err := writeStaticTmpFile(rendered[src], []byte(page)); err != nil {
 			return "", err
 		}

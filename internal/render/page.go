@@ -4,18 +4,19 @@ import (
 	"fmt"
 	"html"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
-// __DOWN__/__UP__/__RIGHT__ are replaced with j/k/l (qwerty) or n/e/i
-// (colemak); h, d/u, g/G, q are layout-stable. __FWD__ is the shifted
-// right key (qwerty L, colemak I) that drives nav history forward;
-// shifted h (H) is layout-stable for back. __RELOAD_CASE__ becomes the
-// `r` reload binding in static mode and is stripped in WS-backed modes,
+// __KEYS_JSON__ is replaced with the resolved key map. __RELOAD_CONDITION__
+// becomes the reload predicate in static mode and false in WS-backed modes,
 // which drive their own refresh.
 const vimKeysScriptTemplate = `
 (() => {
     const STEP = 60;
+    const KEYS = __KEYS_JSON__;
+    function key(action) { return KEYS[action] || ''; }
+    function isKey(e, action) { return key(action) && e.key === key(action); }
     function isEditable(el) {
         if (!el) return false;
         const tag = el.tagName;
@@ -56,58 +57,119 @@ const vimKeysScriptTemplate = `
         if (isEditable(e.target)) return;
         if (window.mdpTreeIsOpen || window.mdpFinderIsOpen) return;
         const h = window.innerHeight;
-        switch (e.key) {
-            case '__DOWN__':  window.scrollBy({ top:  STEP, behavior: 'auto' }); break;
-            case '__UP__':    window.scrollBy({ top: -STEP, behavior: 'auto' }); break;
-            case 'h':         window.scrollBy({ left: -STEP, behavior: 'auto' }); break;
-            case '__RIGHT__': window.scrollBy({ left:  STEP, behavior: 'auto' }); break;
-            case 'd':
-                if (e.repeat) mdpStartHold(1, mdpHoldHalfPx);
-                else window.scrollBy({ top:  h / 2, behavior: 'smooth' });
-                break;
-            case 'u':
-                if (e.repeat) mdpStartHold(-1, mdpHoldHalfPx);
-                else window.scrollBy({ top: -h / 2, behavior: 'smooth' });
-                break;
-            case 'f':
-                if (e.repeat) mdpStartHold(1, mdpHoldFullPx);
-                else window.scrollBy({ top:  h, behavior: 'smooth' });
-                break;
-            case 'b':
-                if (e.repeat) mdpStartHold(-1, mdpHoldFullPx);
-                else window.scrollBy({ top: -h, behavior: 'smooth' });
-                break;
-            case 'g': window.scrollTo({ top: 0, behavior: 'smooth' }); break;
-            case 'G': window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' }); break;
-            case 'H': if (typeof mdpGoBack === 'function') mdpGoBack(); else return; break;
-            case '__FWD__': if (typeof mdpGoForward === 'function') mdpGoForward(); else return; break;
-            case 'q': window.close(); break;
-            __RELOAD_CASE__
-            default: return;
+        if (isKey(e, 'down')) {
+            window.scrollBy({ top:  STEP, behavior: 'auto' });
+        } else if (isKey(e, 'up')) {
+            window.scrollBy({ top: -STEP, behavior: 'auto' });
+        } else if (isKey(e, 'left')) {
+            window.scrollBy({ left: -STEP, behavior: 'auto' });
+        } else if (isKey(e, 'right')) {
+            window.scrollBy({ left:  STEP, behavior: 'auto' });
+        } else if (isKey(e, 'half_down')) {
+            if (e.repeat) mdpStartHold(1, mdpHoldHalfPx);
+            else window.scrollBy({ top:  h / 2, behavior: 'smooth' });
+        } else if (isKey(e, 'half_up')) {
+            if (e.repeat) mdpStartHold(-1, mdpHoldHalfPx);
+            else window.scrollBy({ top: -h / 2, behavior: 'smooth' });
+        } else if (isKey(e, 'full_down')) {
+            if (e.repeat) mdpStartHold(1, mdpHoldFullPx);
+            else window.scrollBy({ top:  h, behavior: 'smooth' });
+        } else if (isKey(e, 'full_up')) {
+            if (e.repeat) mdpStartHold(-1, mdpHoldFullPx);
+            else window.scrollBy({ top: -h, behavior: 'smooth' });
+        } else if (isKey(e, 'top')) {
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+        } else if (isKey(e, 'bottom')) {
+            window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' });
+        } else if (isKey(e, 'history_back')) {
+            if (typeof mdpGoBack === 'function') mdpGoBack(); else return;
+        } else if (isKey(e, 'history_forward')) {
+            if (typeof mdpGoForward === 'function') mdpGoForward(); else return;
+        } else if (isKey(e, 'close')) {
+            window.close();
+        } else if (__RELOAD_CONDITION__) {
+            location.reload();
+        } else {
+            return;
         }
         e.preventDefault();
     });
     document.addEventListener('keyup', (e) => {
-        if (e.key === 'd' || e.key === 'u' || e.key === 'f' || e.key === 'b') mdpStopHold();
+        if (isKey(e, 'half_down') || isKey(e, 'half_up') || isKey(e, 'full_down') || isKey(e, 'full_up')) mdpStopHold();
     });
     window.addEventListener('blur', mdpStopHold);
 })();
 `
 
-func vimKeys(colemak, staticReload bool) string {
+type KeyBindings map[string]string
+
+func defaultKeyBindings(colemak bool) KeyBindings {
 	down, up, right := "j", "k", "l"
+	forward := "L"
 	if colemak {
 		down, up, right = "n", "e", "i"
+		forward = "I"
 	}
-	s := strings.ReplaceAll(vimKeysScriptTemplate, "__DOWN__", down)
-	s = strings.ReplaceAll(s, "__UP__", up)
-	s = strings.ReplaceAll(s, "__RIGHT__", right)
-	s = strings.ReplaceAll(s, "__FWD__", strings.ToUpper(right))
-	reloadCase := ""
+	return KeyBindings{
+		"down":            down,
+		"up":              up,
+		"left":            "h",
+		"right":           right,
+		"half_down":       "d",
+		"half_up":         "u",
+		"full_down":       "f",
+		"full_up":         "b",
+		"top":             "g",
+		"bottom":          "G",
+		"history_back":    "H",
+		"history_forward": forward,
+		"close":           "q",
+		"reload":          "r",
+		"tree_toggle":     "Tab",
+		"tree_down":       down,
+		"tree_up":         up,
+		"tree_left":       "h",
+		"tree_right":      right,
+		"tree_open":       "Enter",
+		"finder_open":     "Ctrl+p",
+	}
+}
+
+func resolveKeyBindings(colemak bool, overrides map[string]string) KeyBindings {
+	keys := defaultKeyBindings(colemak)
+	for action, key := range overrides {
+		if _, ok := keys[action]; ok {
+			keys[action] = key
+		}
+	}
+	return keys
+}
+
+func keysJSON(keys KeyBindings) string {
+	var b strings.Builder
+	b.WriteByte('{')
+	actions := make([]string, 0, len(keys))
+	for action := range keys {
+		actions = append(actions, action)
+	}
+	sort.Strings(actions)
+	for i, action := range actions {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(fmt.Sprintf("%q:%q", action, keys[action]))
+	}
+	b.WriteByte('}')
+	return b.String()
+}
+
+func vimKeys(keys KeyBindings, staticReload bool) string {
+	s := strings.ReplaceAll(vimKeysScriptTemplate, "__KEYS_JSON__", keysJSON(keys))
+	reloadCondition := "false"
 	if staticReload {
-		reloadCase = "case 'r': location.reload(); break;"
+		reloadCondition = "isKey(e, 'reload')"
 	}
-	s = strings.ReplaceAll(s, "__RELOAD_CASE__", reloadCase)
+	s = strings.ReplaceAll(s, "__RELOAD_CONDITION__", reloadCondition)
 	return s
 }
 
@@ -353,7 +415,7 @@ document.addEventListener('keydown', (e) => {
   const tag = (e.target && e.target.tagName) || '';
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
   if (e.target && e.target.isContentEditable) return;
-  if (e.key === 'Tab') {
+  if (e.key === __TREE_TOGGLE__) {
     e.preventDefault();
     mdpToggleTree();
     return;
@@ -364,16 +426,16 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (!mdpTreeIsOpen) return;
-  const isDown = e.key === 'ArrowDown' || e.key === '__TREE_DOWN__';
-  const isUp = e.key === 'ArrowUp' || e.key === '__TREE_UP__';
-  const isLeft = e.key === 'ArrowLeft' || e.key === 'h';
-  const isRight = e.key === 'ArrowRight' || e.key === '__TREE_RIGHT__';
+  const isDown = e.key === 'ArrowDown' || e.key === __TREE_DOWN__;
+  const isUp = e.key === 'ArrowUp' || e.key === __TREE_UP__;
+  const isLeft = e.key === 'ArrowLeft' || e.key === __TREE_LEFT__;
+  const isRight = e.key === 'ArrowRight' || e.key === __TREE_RIGHT__;
   if (isDown || isUp) {
     e.preventDefault();
     mdpTreeMove(isDown ? 1 : -1);
     return;
   }
-  if (e.key === 'Enter') {
+  if (e.key === __TREE_OPEN__) {
     e.preventDefault();
     mdpTreeOpenActive();
     return;
@@ -391,14 +453,17 @@ document.addEventListener('keydown', (e) => {
 });
 `
 
-func buildTreeScript(colemak bool) string {
-	down, up, right := "j", "k", "l"
-	if colemak {
-		down, up, right = "n", "e", "i"
-	}
-	s := strings.ReplaceAll(treeScriptTemplate, "__TREE_DOWN__", down)
-	s = strings.ReplaceAll(s, "__TREE_UP__", up)
-	s = strings.ReplaceAll(s, "__TREE_RIGHT__", right)
+func jsString(s string) string {
+	return fmt.Sprintf("%q", s)
+}
+
+func buildTreeScript(keys KeyBindings) string {
+	s := strings.ReplaceAll(treeScriptTemplate, "__TREE_TOGGLE__", jsString(keys["tree_toggle"]))
+	s = strings.ReplaceAll(s, "__TREE_DOWN__", jsString(keys["tree_down"]))
+	s = strings.ReplaceAll(s, "__TREE_UP__", jsString(keys["tree_up"]))
+	s = strings.ReplaceAll(s, "__TREE_LEFT__", jsString(keys["tree_left"]))
+	s = strings.ReplaceAll(s, "__TREE_RIGHT__", jsString(keys["tree_right"]))
+	s = strings.ReplaceAll(s, "__TREE_OPEN__", jsString(keys["tree_open"]))
 	return s
 }
 
@@ -514,10 +579,8 @@ function mdpFinderClose() {
 window.mdpFinderOpen = mdpFinderOpen;
 
 document.addEventListener('keydown', (e) => {
-  if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
-  if (e.key !== 'p' && e.key !== 'P') return;
+  if (!mdpMatchesKeySpec(e, __FINDER_OPEN__)) return;
   if (e.target && e.target.id === 'mdp-finder-input') return;
-  // swallow browser print
   e.preventDefault();
   if (mdpFinderIsOpen) { mdpFinderClose(); return; }
   mdpFinderOpen();
@@ -547,6 +610,10 @@ document.addEventListener('keydown', (e) => {
   });
 })();
 `
+
+func buildFinderScript(keys KeyBindings) string {
+	return strings.ReplaceAll(finderScriptTemplate, "__FINDER_OPEN__", jsString(keys["finder_open"]))
+}
 
 // __PORT__ is replaced with the server port at runtime.
 const wsScriptTemplate = `
@@ -758,6 +825,19 @@ __BODY__
 <div id="mdp-install-toast" hidden>Install Chromium-based browser for independent windows</div>
 <script>
 window.mdpCurrentFile = __CURRENT_FILE_JS__;
+function mdpMatchesKeySpec(e, spec) {
+  if (!spec) return false;
+  const parts = spec.split('+').map((p) => p.trim()).filter(Boolean);
+  if (!parts.length) return false;
+  const key = parts.pop();
+  const mods = new Set(parts.map((p) => p.toLowerCase()));
+  if (e.ctrlKey !== mods.has('ctrl')) return false;
+  if (e.metaKey !== mods.has('meta')) return false;
+  if (e.altKey !== mods.has('alt')) return false;
+  if (e.shiftKey !== mods.has('shift')) return false;
+  if (key.length === 1) return e.key.toLowerCase() === key.toLowerCase();
+  return e.key === key;
+}
 function mdpFormatTitle(path) {
   if (!path) return 'md-preview';
   const parts = path.split('/').filter(Boolean);
@@ -947,11 +1027,18 @@ __WS_SCRIPT__
 // (only meaningful when at least one of fileTree/fuzzyFinder is on);
 // empty in WS mode (the page fetches /tree on demand).
 func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, currentFile string, fileTree, fuzzyFinder bool, staticTreeJSON string) string {
+	return BuildPageWithKeys(body, theme, wsPort, extraCSS, colemak, currentFile, fileTree, fuzzyFinder, staticTreeJSON, nil)
+}
+
+// BuildPageWithKeys is BuildPage plus user key overrides. Unknown actions are
+// ignored; an empty key disables that action.
+func BuildPageWithKeys(body, theme string, wsPort int, extraCSS string, colemak bool, currentFile string, fileTree, fuzzyFinder bool, staticTreeJSON string, keyOverrides map[string]string) string {
 	// Make every <img> async + lazy so external image fetches
 	// (shields.io badges, remote screenshots, etc.) don't block
 	// first-contentful-paint. Measured ~500ms cold-start improvement
 	// on READMEs with a single shields.io badge.
 	body = MarkImagesAsync(body)
+	keys := resolveKeyBindings(colemak, keyOverrides)
 
 	cssVars := CSSDark
 	hljsThemeCSS := hljsThemeDarkCSS
@@ -994,13 +1081,13 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, cu
 			`<div class="mdp-tree-header"><span>Files</span>` +
 			`<button class="mdp-tree-close" aria-label="Close" title="Close">&times;</button>` +
 			`</div><div class="mdp-tree-body"></div></div>`
-		treeScript = buildTreeScript(colemak)
+		treeScript = buildTreeScript(keys)
 	}
 	if fuzzyFinder {
 		finderDOM = `<div id="mdp-finder" hidden>` +
 			`<input id="mdp-finder-input" type="text" autocomplete="off" spellcheck="false" placeholder="Find file" aria-label="Find file">` +
 			`<ul id="mdp-finder-list" role="listbox"></ul></div>`
-		finderScript = finderScriptTemplate
+		finderScript = buildFinderScript(keys)
 	}
 	if fileTree || fuzzyFinder {
 		treeData := ""
@@ -1027,7 +1114,7 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, cu
 		"__KATEX_AUTORENDER_SCRIPT__", katexAutoRenderJSOut,
 		"__MERMAID_SCRIPT__", mermaidJSOut,
 		"__MERMAID_INIT__", mermaidInit,
-		"__VIM_KEYS__", vimKeys(colemak, wsPort == 0),
+		"__VIM_KEYS__", vimKeys(keys, wsPort == 0),
 		"__TREE_DOM__", treeDOM,
 		"__FINDER_DOM__", finderDOM,
 		"__SHARED_NAV_SCRIPT__", sharedNavScript,

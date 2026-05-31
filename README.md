@@ -134,7 +134,28 @@ browser    = "auto"          # "auto" | "firefox --new-window" | ["cmd", "arg"]
                              # auto = chrome --app= → xdg-open / open
 edit       = false           # default for -e (also open nvim). Override with -e / --no-edit.
 colemak    = false           # swap in-page nav keys j/k/l → n/e/i
+file_tree    = true          # Tab toggles a sidebar listing previewable files
+fuzzy_finder = true          # Ctrl+P opens a fuzzy file finder
+
+[keys]
+down = "j"
+up = "k"
+left = "h"
+right = "l"
+tree_toggle = "Tab"
+tree_open = "Enter"
+finder_open = "Ctrl+p"
 ```
+
+Key values use browser `KeyboardEvent.key` names (`j`, `ArrowDown`,
+`Enter`, `Tab`, etc.). Most actions are single keys; `finder_open` also
+accepts modifier chords like `Ctrl+p`, `Meta+p`, or `Ctrl+Shift+p`.
+Unknown key actions are ignored, and an empty string disables that action.
+
+Supported actions: `down`, `up`, `left`, `right`, `half_down`, `half_up`,
+`full_down`, `full_up`, `top`, `bottom`, `history_back`, `history_forward`,
+`close`, `reload`, `tree_toggle`, `tree_down`, `tree_up`, `tree_left`,
+`tree_right`, `tree_open`, `finder_open`.
 
 CLI flags override config values.
 

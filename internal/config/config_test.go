@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -33,7 +34,7 @@ func TestLoad_MissingFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() err = %v, want nil", err)
 	}
-	if cfg != defaults() {
+	if !reflect.DeepEqual(cfg, defaults()) {
 		t.Fatalf("Load() cfg = %+v, want defaults()", cfg)
 	}
 }
@@ -61,7 +62,7 @@ func TestEnsureDefault_CreatesWhenMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() over seeded config: %v", err)
 	}
-	if cfg != defaults() {
+	if !reflect.DeepEqual(cfg, defaults()) {
 		t.Errorf("seeded config should parse as defaults(); got %+v", cfg)
 	}
 }
@@ -115,7 +116,7 @@ func TestLoad_FullConfig(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			body := "theme = \"light\"\nfont_size = 20\ncustom_css = \"~/foo.css\"\nedit = true\n" + tc.browserKey + "\n"
+			body := "theme = \"light\"\nfont_size = 20\ncustom_css = \"~/foo.css\"\nedit = true\n" + tc.browserKey + "\n[keys]\ndown = \"s\"\nfinder_open = \"Ctrl+o\"\n"
 			writeConfig(t, body)
 			cfg, err := Load()
 			if err != nil {
@@ -132,6 +133,12 @@ func TestLoad_FullConfig(t *testing.T) {
 			}
 			if !cfg.Edit {
 				t.Errorf("Edit = false, want true")
+			}
+			if got := cfg.Keys["down"]; got != "s" {
+				t.Errorf("Keys[down] = %q, want s", got)
+			}
+			if got := cfg.Keys["finder_open"]; got != "Ctrl+o" {
+				t.Errorf("Keys[finder_open] = %q, want Ctrl+o", got)
 			}
 			switch want := tc.wantBrowser.(type) {
 			case string:
@@ -160,7 +167,7 @@ func TestLoad_BadTOML(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Load() err = nil, want non-nil")
 	}
-	if cfg != defaults() {
+	if !reflect.DeepEqual(cfg, defaults()) {
 		t.Fatalf("Load() cfg = %+v, want defaults() on error", cfg)
 	}
 }

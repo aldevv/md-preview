@@ -432,7 +432,7 @@ func TestBuildPage_DarkTheme(t *testing.T) {
 		"pre code.hljs",
 		"background:#0d1117",
 		"var hljs=function()",
-		"case 'j':",
+		"isKey(e, 'down')",
 	}
 	for _, want := range wants {
 		if !strings.Contains(page, want) {
@@ -513,13 +513,13 @@ func TestBuildPage_ExtraCSS(t *testing.T) {
 func TestBuildPage_VimKeys(t *testing.T) {
 	t.Run("noWS", func(t *testing.T) {
 		page := BuildPage("<p>x</p>", "dark", 0, "", false, "", false, false, "")
-		if !strings.Contains(page, "case 'j':") {
+		if !strings.Contains(page, "isKey(e, 'down')") || !strings.Contains(page, `"down":"j"`) {
 			t.Errorf("vim-keys script missing when wsPort=0")
 		}
 	})
 	t.Run("withWS", func(t *testing.T) {
 		page := BuildPage("<p>x</p>", "dark", 8765, "", false, "", false, false, "")
-		if !strings.Contains(page, "case 'j':") {
+		if !strings.Contains(page, "isKey(e, 'down')") || !strings.Contains(page, `"down":"j"`) {
 			t.Errorf("vim-keys script missing when wsPort>0")
 		}
 	})
@@ -528,14 +528,14 @@ func TestBuildPage_VimKeys(t *testing.T) {
 func TestBuildPage_QuitKey(t *testing.T) {
 	for _, colemak := range []bool{false, true} {
 		page := BuildPage("<p>x</p>", "dark", 0, "", colemak, "", false, false, "")
-		if !strings.Contains(page, "case 'q': window.close();") {
+		if !strings.Contains(page, `"close":"q"`) || !strings.Contains(page, "window.close();") {
 			t.Errorf("page missing q→close binding (colemak=%v)", colemak)
 		}
 	}
 }
 
 func TestBuildPage_ReloadKey(t *testing.T) {
-	want := "case 'r': location.reload();"
+	want := "else if (isKey(e, 'reload'))"
 	t.Run("static", func(t *testing.T) {
 		page := BuildPage("<p>x</p>", "dark", 0, "", false, "", false, false, "")
 		if !strings.Contains(page, want) {
@@ -587,12 +587,12 @@ func TestBuildPage_FileTreeEnabled(t *testing.T) {
 		`class="mdp-tree-body"`,
 		"mdpToggleTree",
 		"mdpEnsureTreeData",
-		"e.key === 'Tab'",
-		"e.key === 'Enter'",
-		"e.key === 'ArrowDown' || e.key === 'j'",
-		"e.key === 'ArrowUp' || e.key === 'k'",
-		"e.key === 'ArrowRight' || e.key === 'l'",
-		"e.key === 'ArrowLeft' || e.key === 'h'",
+		`e.key === "Tab"`,
+		`e.key === "Enter"`,
+		`e.key === 'ArrowDown' || e.key === "j"`,
+		`e.key === 'ArrowUp' || e.key === "k"`,
+		`e.key === 'ArrowRight' || e.key === "l"`,
+		`e.key === 'ArrowLeft' || e.key === "h"`,
 	}
 	for _, w := range wants {
 		if !strings.Contains(page, w) {
@@ -610,17 +610,17 @@ func TestBuildPage_FileTreeEnabled(t *testing.T) {
 func TestBuildPage_FileTreeColemakKeys(t *testing.T) {
 	page := BuildPage("<p>x</p>", "dark", 0, "", true, "", true, false, "")
 	wants := []string{
-		"e.key === 'ArrowDown' || e.key === 'n'",
-		"e.key === 'ArrowUp' || e.key === 'e'",
-		"e.key === 'ArrowRight' || e.key === 'i'",
-		"e.key === 'ArrowLeft' || e.key === 'h'",
+		`e.key === 'ArrowDown' || e.key === "n"`,
+		`e.key === 'ArrowUp' || e.key === "e"`,
+		`e.key === 'ArrowRight' || e.key === "i"`,
+		`e.key === 'ArrowLeft' || e.key === "h"`,
 	}
 	for _, w := range wants {
 		if !strings.Contains(page, w) {
 			t.Errorf("colemak tree page missing %q", w)
 		}
 	}
-	for _, bad := range []string{"__TREE_DOWN__", "__TREE_UP__", "__TREE_RIGHT__", "e.key === 'ArrowDown' || e.key === 'j'", "e.key === 'ArrowUp' || e.key === 'k'", "e.key === 'ArrowRight' || e.key === 'l'"} {
+	for _, bad := range []string{"__TREE_DOWN__", "__TREE_UP__", "__TREE_RIGHT__", `e.key === 'ArrowDown' || e.key === "j"`, `e.key === 'ArrowUp' || e.key === "k"`, `e.key === 'ArrowRight' || e.key === "l"`} {
 		if strings.Contains(page, bad) {
 			t.Errorf("colemak tree page should not contain %q", bad)
 		}
@@ -649,7 +649,7 @@ func TestBuildPage_FuzzyFinderEnabledStandalone(t *testing.T) {
 		"mdpFuzzyMatch",
 		"mdpFinderOpen",
 		"mdpEnsureTreeData",
-		`e.key !== 'p' && e.key !== 'P'`,
+		`mdpMatchesKeySpec(e, "Ctrl+p")`,
 	}
 	for _, w := range wants {
 		if !strings.Contains(page, w) {
@@ -690,40 +690,63 @@ func TestBuildPage_FuzzyFinderAndTreeShareData(t *testing.T) {
 
 func TestBuildPage_NavHistoryKeys_Qwerty(t *testing.T) {
 	page := BuildPage("<p>x</p>", "dark", 0, "", false, "", false, false, "")
-	for _, want := range []string{"case 'H':", "case 'L':", "mdpGoBack()", "mdpGoForward()"} {
+	for _, want := range []string{`"history_back":"H"`, `"history_forward":"L"`, "mdpGoBack()", "mdpGoForward()"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("qwerty page missing %q", want)
 		}
 	}
-	if strings.Contains(page, "case 'I':") {
+	if strings.Contains(page, `"history_forward":"I"`) {
 		t.Errorf("qwerty page should not bind 'I' (that's the colemak forward)")
 	}
 }
 
 func TestBuildPage_NavHistoryKeys_Colemak(t *testing.T) {
 	page := BuildPage("<p>x</p>", "dark", 0, "", true, "", false, false, "")
-	for _, want := range []string{"case 'H':", "case 'I':", "mdpGoBack()", "mdpGoForward()"} {
+	for _, want := range []string{`"history_back":"H"`, `"history_forward":"I"`, "mdpGoBack()", "mdpGoForward()"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("colemak page missing %q", want)
 		}
 	}
-	if strings.Contains(page, "case 'L':") {
+	if strings.Contains(page, `"history_forward":"L"`) {
 		t.Errorf("colemak page should not bind 'L' (qwerty-only forward)")
 	}
 }
 
 func TestBuildPage_Colemak(t *testing.T) {
 	page := BuildPage("<p>x</p>", "dark", 0, "", true, "", false, false, "")
-	wants := []string{"case 'n':", "case 'e':", "case 'i':", "case 'h':"}
+	wants := []string{`"down":"n"`, `"up":"e"`, `"right":"i"`, `"left":"h"`}
 	for _, want := range wants {
 		if !strings.Contains(page, want) {
 			t.Errorf("colemak page missing %q", want)
 		}
 	}
-	bad := []string{"case 'j':", "case 'k':", "case 'l':"}
+	bad := []string{`"down":"j"`, `"up":"k"`, `"right":"l"`}
 	for _, b := range bad {
 		if strings.Contains(page, b) {
 			t.Errorf("colemak page should not contain %q", b)
 		}
+	}
+}
+
+func TestBuildPageWithKeys_CustomOverrides(t *testing.T) {
+	page := BuildPageWithKeys("<p>x</p>", "dark", 0, "", false, "", true, true, "", map[string]string{
+		"down":        "s",
+		"tree_toggle": "t",
+		"tree_open":   "o",
+		"finder_open": "Ctrl+o",
+		"bogus":       "x",
+	})
+	for _, want := range []string{
+		`"down":"s"`,
+		`e.key === "t"`,
+		`e.key === "o"`,
+		`mdpMatchesKeySpec(e, "Ctrl+o")`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("custom-key page missing %q", want)
+		}
+	}
+	if strings.Contains(page, `"bogus":"x"`) {
+		t.Errorf("unknown key action should not be emitted")
 	}
 }
