@@ -335,6 +335,7 @@ func renderEntryAsStaticTree(rc resolved, env Environment, stderr io.Writer) (st
 		Theme:    rc.theme,
 		ExtraCSS: config.ExtraCSS(rc.cfg, stderr),
 		Colemak:  rc.cfg.Colemak,
+		FileTree: rc.cfg.FileTree,
 	}
 	entryHTML, err := render.RenderStaticTree(rc.src, env.TempDir(), opts)
 	if err != nil {
@@ -358,7 +359,7 @@ func renderEntryAsSingleFile(rc resolved, env Environment, stderr io.Writer) (st
 		}
 		return render.FileURL(abs), true
 	})
-	page := render.BuildPage(body, rc.theme, 0, config.ExtraCSS(rc.cfg, stderr), rc.cfg.Colemak, rc.src)
+	page := render.BuildPage(body, rc.theme, 0, config.ExtraCSS(rc.cfg, stderr), rc.cfg.Colemak, rc.src, false, "")
 	tmpPath := tmpHTMLPath(env.TempDir(), rc.src)
 	if err := writeTmpFile(tmpPath, []byte(page)); err != nil {
 		fmt.Fprintf(stderr, "mdp: writing tmp: %v\n", err)
@@ -499,6 +500,7 @@ func runWatchSubcommand(args []string, stdout, stderr io.Writer, env Environment
 		Port:     0,
 		Theme:    rc.theme,
 		Colemak:  rc.cfg.Colemak,
+		FileTree: rc.cfg.FileTree,
 		Watch:    true,
 		ExtraCSS: config.ExtraCSS(rc.cfg, stderr),
 	}
@@ -605,6 +607,7 @@ func runServe(args []string, stderr io.Writer) int {
 		Port:     port,
 		Theme:    args[2],
 		Colemak:  colemak,
+		FileTree: cfg.FileTree,
 		ExtraCSS: config.ExtraCSS(cfg, stderr),
 	}
 	if err := server.Run(opts); err != nil {

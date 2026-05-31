@@ -3,6 +3,7 @@ package render
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	gohtml "html"
 	"net/url"
@@ -32,6 +33,7 @@ type StaticTreeOptions struct {
 	Theme    string
 	ExtraCSS string
 	Colemak  bool
+	FileTree bool
 	// MaxFiles overrides StaticTreeMaxFiles when nonzero.
 	MaxFiles int
 	// PandocBudget overrides StaticTreePandocBudget when nonzero.
@@ -91,6 +93,29 @@ func RenderStaticTree(entry, tmpDir string, opts StaticTreeOptions) (string, err
 	if pandoc.InputFormat(resolvedEntry) != "" {
 		pandocCount++
 	}
+	// FileTree wants every previewable sibling clickable from the
+	// sidebar, not just files reachable via <a href> from the entry. Seed
+	// the queue with the whole walkable set so each one becomes a real
+	// pre-rendered tmp HTML target; the BFS still discovers nothing new
+	// from there, it just renders them. Budgets/caps still apply.
+	if opts.FileTree {
+		siblings, _ := WalkableFiles(rootDir, 0)
+		for _, rel := range siblings {
+			abs := filepath.Join(rootDir, filepath.FromSlash(rel))
+			resolved, err := filepath.EvalSymlinks(abs)
+			if err != nil || seen[resolved] {
+				continue
+			}
+			if pandoc.InputFormat(resolved) != "" {
+				if pandocCount >= pandocBudget {
+					continue
+				}
+				pandocCount++
+			}
+			seen[resolved] = true
+			queue = append(queue, resolved)
+		}
+	}
 	for len(queue) > 0 && len(bodies) < maxFiles {
 		batch := queue
 		queue = nil
@@ -125,6 +150,11 @@ func RenderStaticTree(entry, tmpDir string, opts StaticTreeOptions) (string, err
 		rendered[src] = TmpHTMLPath(tmpDir, src)
 	}
 
+	treeJSON := ""
+	if opts.FileTree {
+		treeJSON = buildStaticTreeJSON(rootDir, rendered)
+	}
+
 	for src, body := range bodies {
 		rewritten := RewriteStaticLinks(body, src, rootDir, rendered)
 		rewritten = RewriteImgSrc(rewritten, filepath.Dir(src), func(abs string) (string, bool) {
@@ -134,12 +164,43 @@ func RenderStaticTree(entry, tmpDir string, opts StaticTreeOptions) (string, err
 			}
 			return FileURL(resolved), true
 		})
-		page := BuildPage(rewritten, opts.Theme, 0, opts.ExtraCSS, opts.Colemak, src)
+		page := BuildPage(rewritten, opts.Theme, 0, opts.ExtraCSS, opts.Colemak, src, opts.FileTree, treeJSON)
 		if err := writeStaticTmpFile(rendered[src], []byte(page)); err != nil {
 			return "", err
 		}
 	}
 	return rendered[resolvedEntry], nil
+}
+
+// buildStaticTreeJSON walks the whole rootDir for files mdp can open
+// and pairs each with its tmp HTML file path when one exists. Files we
+// didn't pre-render (over-cap or unreachable from the entry) get an
+// empty string; the JS tree click handler surfaces a toast for those.
+// Errors are swallowed: the tree is a nice-to-have, not a hard
+// dependency for serving the entry page.
+func buildStaticTreeJSON(rootDir string, rendered map[string]string) string {
+	files, err := WalkableFiles(rootDir, 0)
+	if err != nil {
+		return ""
+	}
+	renderedRel := make(map[string]string, len(rendered))
+	for src, tmp := range rendered {
+		rel, err := filepath.Rel(rootDir, src)
+		if err != nil {
+			continue
+		}
+		renderedRel[filepath.ToSlash(rel)] = FileURL(tmp)
+	}
+	payload := map[string]any{
+		"root":     rootDir,
+		"files":    files,
+		"rendered": renderedRel,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
 }
 
 type renderResult struct {

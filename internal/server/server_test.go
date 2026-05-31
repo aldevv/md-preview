@@ -183,6 +183,49 @@ func TestHandler_GetReload(t *testing.T) {
 	}
 }
 
+func TestHandler_GetTree_ListsWalkableFiles(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	writeMD(t, dir, "other.md", "# Other\n")
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeMD(t, filepath.Join(dir, "sub"), "nested.md", "# Nested\n")
+	writeMD(t, dir, "skip.txt", "not a doc")
+	s := newTestState(t, file)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/tree")
+	if err != nil {
+		t.Fatalf("GET /tree: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var got struct {
+		Root  string   `json:"root"`
+		Files []string `json:"files"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Root == "" {
+		t.Errorf("root empty, want absolute path")
+	}
+	wantFiles := map[string]bool{"doc.md": true, "other.md": true, "sub/nested.md": true}
+	for _, f := range got.Files {
+		if !wantFiles[f] {
+			t.Errorf("unexpected file in tree: %q", f)
+		}
+		delete(wantFiles, f)
+	}
+	for f := range wantFiles {
+		t.Errorf("tree missing %q", f)
+	}
+}
+
 func TestHandler_404(t *testing.T) {
 	dir := t.TempDir()
 	file := writeMD(t, dir, "doc.md", "# Hello\n")

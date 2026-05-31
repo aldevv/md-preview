@@ -33,8 +33,8 @@ func TestLoad_MissingFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() err = %v, want nil", err)
 	}
-	if (cfg != Config{}) {
-		t.Fatalf("Load() cfg = %+v, want zero", cfg)
+	if cfg != defaults() {
+		t.Fatalf("Load() cfg = %+v, want defaults()", cfg)
 	}
 }
 
@@ -55,14 +55,14 @@ func TestEnsureDefault_CreatesWhenMissing(t *testing.T) {
 			t.Errorf("seeded config missing %q", want)
 		}
 	}
-	// Sanity: a fresh Load() over the seeded scaffold yields the zero Config
-	// (everything is commented out).
+	// Sanity: a fresh Load() over the seeded scaffold yields the
+	// built-in defaults (everything is commented out).
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load() over seeded config: %v", err)
 	}
-	if (cfg != Config{}) {
-		t.Errorf("seeded config should parse as zero Config; got %+v", cfg)
+	if cfg != defaults() {
+		t.Errorf("seeded config should parse as defaults(); got %+v", cfg)
 	}
 }
 
@@ -160,8 +160,8 @@ func TestLoad_BadTOML(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Load() err = nil, want non-nil")
 	}
-	if (cfg != Config{}) {
-		t.Fatalf("Load() cfg = %+v, want zero on error", cfg)
+	if cfg != defaults() {
+		t.Fatalf("Load() cfg = %+v, want defaults() on error", cfg)
 	}
 }
 

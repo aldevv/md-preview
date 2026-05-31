@@ -26,6 +26,7 @@ type Config struct {
 	Browser   any      `toml:"browser"`
 	Edit      bool     `toml:"edit"`
 	Colemak   bool     `toml:"colemak"`
+	FileTree  bool     `toml:"file_tree"`
 }
 
 // Path returns the resolved config file path, honoring XDG_CONFIG_HOME and
@@ -53,6 +54,7 @@ const defaultConfigTemplate = `# md-preview config: uncomment any line to overri
 # browser    = "auto"           # "auto" | "firefox --new-window" | ["cmd", "arg"]
 # edit       = false            # default for -e (also open nvim)
 # colemak    = false            # swap in-page nav keys j/k/l → n/e/i
+# file_tree  = true             # Tab toggles a sidebar listing previewable files
 `
 
 // EnsureDefault writes a commented default config file to Path() when one
@@ -73,10 +75,10 @@ func EnsureDefault() error {
 }
 
 // Load reads and parses the config from Path(). A missing file is not an
-// error: callers get a zero Config and nil. Parse errors return a zero
-// Config plus the error so callers can warn the user.
+// error: callers get the defaults and nil. Parse errors return the
+// defaults plus the error so callers can warn the user.
 func Load() (Config, error) {
-	var cfg Config
+	cfg := defaults()
 	path := Path()
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		return cfg, nil
@@ -84,9 +86,16 @@ func Load() (Config, error) {
 		return cfg, err
 	}
 	if _, err := toml.DecodeFile(path, &cfg); err != nil {
-		return Config{}, err
+		return defaults(), err
 	}
 	return cfg, nil
+}
+
+// defaults seeds the fields that should be on out-of-the-box; TOML
+// decode merges user overrides over this struct, so an absent key keeps
+// the default and an explicit `false` (or other zero value) wins.
+func defaults() Config {
+	return Config{FileTree: true}
 }
 
 // ExpandTilde replaces a leading "~/" with the user's home directory. Bare

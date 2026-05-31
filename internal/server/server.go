@@ -44,6 +44,7 @@ type state struct {
 	theme           string
 	port            int
 	colemak         bool
+	fileTree        bool
 	extraCSS        string
 	eventLog        io.Writer
 	wsClients       map[net.Conn]struct{}
@@ -244,6 +245,7 @@ func newHandler(s *state) http.Handler {
 	mux.HandleFunc("/ws", guard(http.MethodGet, s.handleWS))
 	mux.HandleFunc("/render", guard(http.MethodPost, s.handleRender))
 	mux.HandleFunc("/scroll", guard(http.MethodPost, s.handleScroll))
+	mux.HandleFunc("/tree", guard(http.MethodGet, s.handleTree))
 	mux.HandleFunc("/_img/", guard(http.MethodGet, s.handleImg))
 	return mux
 }
@@ -254,6 +256,7 @@ func (s *state) handleIndex(w http.ResponseWriter, r *http.Request) {
 	theme := s.theme
 	port := s.port
 	colemak := s.colemak
+	fileTree := s.fileTree
 	file := s.file
 	fileDir := s.fileDir
 	extraCSS := s.extraCSS
@@ -266,7 +269,7 @@ func (s *state) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return imgURLFor(abs, fileDir)
 	})
 
-	page := render.BuildPage(body, theme, port, extraCSS, colemak, file)
+	page := render.BuildPage(body, theme, port, extraCSS, colemak, file, fileTree, "")
 	encoded := []byte(page)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(len(encoded)))
@@ -340,6 +343,21 @@ func (s *state) handleReload(w http.ResponseWriter, r *http.Request) {
 	v := s.renderVersion
 	s.mu.Unlock()
 	writeJSON(w, map[string]any{"version": v})
+}
+
+// handleTree lists every walkable file under fileDir for the Tab-toggle
+// sidebar. Forward-slash relative paths so the client can build links
+// without OS-specific path handling.
+func (s *state) handleTree(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	root := s.fileDir
+	s.mu.Unlock()
+	files, err := render.WalkableFiles(root, 0)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "walking tree: "+err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"root": root, "files": files})
 }
 
 // pathInsideDir reports whether cleanPath is dir or under dir. Both
@@ -581,6 +599,7 @@ type Options struct {
 	Port     int
 	Theme    string
 	Colemak  bool
+	FileTree bool
 	Watch    bool
 	ExtraCSS string
 	EventLog io.Writer
@@ -656,6 +675,7 @@ func serve(ctx context.Context, s *state, stdin io.Reader, quit func(), watch bo
 // startup line is parsed by external tooling and must stay on stdout.
 func Run(opts Options) error {
 	s := newState(opts.File, opts.Port, opts.Theme, opts.Colemak)
+	s.fileTree = opts.FileTree
 	s.extraCSS = opts.ExtraCSS
 	s.eventLog = opts.EventLog
 	return serve(context.Background(), s, os.Stdin, func() { os.Exit(0) }, opts.Watch, opts.OnListen)

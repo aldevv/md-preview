@@ -62,6 +62,64 @@ func TestRenderStaticTree_FollowsMdLinks(t *testing.T) {
 	}
 }
 
+func TestRenderStaticTree_FileTreeEmbedsRenderedMap(t *testing.T) {
+	root := t.TempDir()
+	tmp := t.TempDir()
+	entry := writeMD(t, root, "index.md", "# Index\n[other](other.md)\n")
+	writeMD(t, root, "other.md", "# Other\n")
+	writeMD(t, root, "orphan.md", "# Orphan (no link from entry)\n")
+
+	if _, err := RenderStaticTree(entry, tmp, StaticTreeOptions{Theme: "dark", FileTree: true}); err != nil {
+		t.Fatalf("RenderStaticTree: %v", err)
+	}
+	got, err := os.ReadFile(TmpHTMLPath(tmp, entry))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(got)
+	for _, want := range []string{
+		"window.mdpStaticTree = ",
+		`"index.md"`,
+		`"other.md"`,
+		`"orphan.md"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("page missing %q", want)
+		}
+	}
+}
+
+func TestRenderStaticTree_FileTreeOn_PreRendersOrphans(t *testing.T) {
+	root := t.TempDir()
+	tmp := t.TempDir()
+	entry := writeMD(t, root, "index.md", "# Index\n[other](other.md)\n")
+	writeMD(t, root, "other.md", "# Other\n")
+	orphan := writeMD(t, root, "orphan.md", "# Orphan\n")
+
+	if _, err := RenderStaticTree(entry, tmp, StaticTreeOptions{Theme: "dark", FileTree: true}); err != nil {
+		t.Fatalf("RenderStaticTree: %v", err)
+	}
+	if _, err := os.Stat(TmpHTMLPath(tmp, orphan)); err != nil {
+		t.Errorf("FileTree=true should pre-render orphan files; missing %s: %v", TmpHTMLPath(tmp, orphan), err)
+	}
+}
+
+func TestRenderStaticTree_FileTreeOff_NoEmbed(t *testing.T) {
+	root := t.TempDir()
+	tmp := t.TempDir()
+	entry := writeMD(t, root, "index.md", "# Index\n")
+	if _, err := RenderStaticTree(entry, tmp, StaticTreeOptions{Theme: "dark"}); err != nil {
+		t.Fatalf("RenderStaticTree: %v", err)
+	}
+	got, _ := os.ReadFile(TmpHTMLPath(tmp, entry))
+	if strings.Contains(string(got), "mdpStaticTree") {
+		t.Errorf("FileTree=false should not embed mdpStaticTree")
+	}
+	if strings.Contains(string(got), `id="mdp-tree"`) {
+		t.Errorf("FileTree=false should not include sidebar DOM")
+	}
+}
+
 func TestRenderStaticTree_RewritesImgSrcsPerFile(t *testing.T) {
 	root := t.TempDir()
 	tmp := t.TempDir()

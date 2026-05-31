@@ -426,7 +426,7 @@ func TestRenderBody_MissingFile(t *testing.T) {
 }
 
 func TestBuildPage_DarkTheme(t *testing.T) {
-	page := BuildPage(`<pre><code class="language-go">x</code></pre>`, "dark", 0, "", false, "")
+	page := BuildPage(`<pre><code class="language-go">x</code></pre>`, "dark", 0, "", false, "", false, "")
 	wants := []string{
 		"--color-bg-primary: #0d1117",
 		"pre code.hljs",
@@ -445,7 +445,7 @@ func TestBuildPage_DarkTheme(t *testing.T) {
 }
 
 func TestBuildPage_LightTheme(t *testing.T) {
-	page := BuildPage(`<pre><code class="language-go">x</code></pre>`, "light", 0, "", false, "")
+	page := BuildPage(`<pre><code class="language-go">x</code></pre>`, "light", 0, "", false, "", false, "")
 	wants := []string{
 		"--color-bg-primary: #ffffff",
 		"pre code.hljs",
@@ -463,7 +463,7 @@ func TestBuildPage_LightTheme(t *testing.T) {
 }
 
 func TestBuildPage_OmitsHljsForProse(t *testing.T) {
-	page := BuildPage("<p>just prose, no fences</p>", "dark", 0, "", false, "")
+	page := BuildPage("<p>just prose, no fences</p>", "dark", 0, "", false, "", false, "")
 	for _, bad := range []string{"var hljs=function()", "hljs.highlightAll();", "pre code.hljs"} {
 		if strings.Contains(page, bad) {
 			t.Errorf("prose-only page should omit %q", bad)
@@ -472,7 +472,7 @@ func TestBuildPage_OmitsHljsForProse(t *testing.T) {
 }
 
 func TestBuildPage_IncludesHljsForCodeFence(t *testing.T) {
-	page := BuildPage(`<pre><code class="language-go">package main</code></pre>`, "dark", 0, "", false, "")
+	page := BuildPage(`<pre><code class="language-go">package main</code></pre>`, "dark", 0, "", false, "", false, "")
 	for _, want := range []string{"var hljs=function()", "hljs.highlightAll();", "pre code.hljs"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("code-fence page should include %q", want)
@@ -481,14 +481,14 @@ func TestBuildPage_IncludesHljsForCodeFence(t *testing.T) {
 }
 
 func TestBuildPage_NoWS(t *testing.T) {
-	page := BuildPage("<p>x</p>", "dark", 0, "", false, "")
+	page := BuildPage("<p>x</p>", "dark", 0, "", false, "", false, "")
 	if strings.Contains(page, "new WebSocket") {
 		t.Errorf("expected no WebSocket script when wsPort=0; page contains it")
 	}
 }
 
 func TestBuildPage_WithWS(t *testing.T) {
-	page := BuildPage("<p>x</p>", "dark", 8765, "", false, "")
+	page := BuildPage("<p>x</p>", "dark", 8765, "", false, "", false, "")
 	if !strings.Contains(page, "new WebSocket('ws://localhost:8765/ws')") {
 		t.Errorf("page missing WebSocket connect string for port 8765")
 	}
@@ -496,7 +496,7 @@ func TestBuildPage_WithWS(t *testing.T) {
 
 func TestBuildPage_ExtraCSS(t *testing.T) {
 	marker := "body { font-size: 42px; }"
-	page := BuildPage("<p>x</p>", "dark", 0, marker, false, "")
+	page := BuildPage("<p>x</p>", "dark", 0, marker, false, "", false, "")
 	idxExtra := strings.Index(page, marker)
 	idxCommon := strings.Index(page, ".markdown-body h1 {")
 	if idxExtra < 0 {
@@ -512,13 +512,13 @@ func TestBuildPage_ExtraCSS(t *testing.T) {
 
 func TestBuildPage_VimKeys(t *testing.T) {
 	t.Run("noWS", func(t *testing.T) {
-		page := BuildPage("<p>x</p>", "dark", 0, "", false, "")
+		page := BuildPage("<p>x</p>", "dark", 0, "", false, "", false, "")
 		if !strings.Contains(page, "case 'j':") {
 			t.Errorf("vim-keys script missing when wsPort=0")
 		}
 	})
 	t.Run("withWS", func(t *testing.T) {
-		page := BuildPage("<p>x</p>", "dark", 8765, "", false, "")
+		page := BuildPage("<p>x</p>", "dark", 8765, "", false, "", false, "")
 		if !strings.Contains(page, "case 'j':") {
 			t.Errorf("vim-keys script missing when wsPort>0")
 		}
@@ -527,7 +527,7 @@ func TestBuildPage_VimKeys(t *testing.T) {
 
 func TestBuildPage_QuitKey(t *testing.T) {
 	for _, colemak := range []bool{false, true} {
-		page := BuildPage("<p>x</p>", "dark", 0, "", colemak, "")
+		page := BuildPage("<p>x</p>", "dark", 0, "", colemak, "", false, "")
 		if !strings.Contains(page, "case 'q': window.close();") {
 			t.Errorf("page missing q→close binding (colemak=%v)", colemak)
 		}
@@ -537,13 +537,13 @@ func TestBuildPage_QuitKey(t *testing.T) {
 func TestBuildPage_ReloadKey(t *testing.T) {
 	want := "case 'r': location.reload();"
 	t.Run("static", func(t *testing.T) {
-		page := BuildPage("<p>x</p>", "dark", 0, "", false, "")
+		page := BuildPage("<p>x</p>", "dark", 0, "", false, "", false, "")
 		if !strings.Contains(page, want) {
 			t.Errorf("static page missing r→reload binding")
 		}
 	})
 	t.Run("withWS", func(t *testing.T) {
-		page := BuildPage("<p>x</p>", "dark", 8765, "", false, "")
+		page := BuildPage("<p>x</p>", "dark", 8765, "", false, "", false, "")
 		if strings.Contains(page, want) {
 			t.Errorf("WS-backed page should not bind r→reload (watch/serve drive their own refresh)")
 		}
@@ -551,7 +551,7 @@ func TestBuildPage_ReloadKey(t *testing.T) {
 }
 
 func TestBuildPage_HasExternalLinkHandler(t *testing.T) {
-	page := BuildPage("<p>x</p>", "dark", 0, "", false, "")
+	page := BuildPage("<p>x</p>", "dark", 0, "", false, "", false, "")
 	wants := []string{
 		"/^(https?|mailto|tel|ftp|ftps):/i",
 		"window.open(href, '_blank', 'noopener,noreferrer')",
@@ -565,8 +565,82 @@ func TestBuildPage_HasExternalLinkHandler(t *testing.T) {
 	}
 }
 
+func TestBuildPage_FileTreeDisabled(t *testing.T) {
+	page := BuildPage("<p>x</p>", "dark", 0, "", false, "", false, "")
+	bad := []string{
+		`id="mdp-tree"`,
+		"mdpToggleTree",
+		"mdpEnsureTreeData",
+		"window.mdpStaticTree =",
+	}
+	for _, b := range bad {
+		if strings.Contains(page, b) {
+			t.Errorf("disabled-tree page should not contain %q", b)
+		}
+	}
+}
+
+func TestBuildPage_FileTreeEnabled(t *testing.T) {
+	page := BuildPage("<p>x</p>", "dark", 0, "", false, "", true, "")
+	wants := []string{
+		`id="mdp-tree"`,
+		`class="mdp-tree-body"`,
+		"mdpToggleTree",
+		"mdpEnsureTreeData",
+		"e.key === 'Tab'",
+	}
+	for _, w := range wants {
+		if !strings.Contains(page, w) {
+			t.Errorf("enabled-tree page missing %q", w)
+		}
+	}
+	if strings.Contains(page, "window.mdpStaticTree =") {
+		t.Errorf("WS-mode page (empty static JSON) should not embed a window.mdpStaticTree assignment")
+	}
+}
+
+func TestBuildPage_FileTreeStaticData(t *testing.T) {
+	page := BuildPage("<p>x</p>", "dark", 0, "", false, "", true, `{"root":"/r","files":["a.md"]}`)
+	wants := []string{
+		`window.mdpStaticTree = {"root":"/r","files":["a.md"]};`,
+		"mdpToggleTree",
+	}
+	for _, w := range wants {
+		if !strings.Contains(page, w) {
+			t.Errorf("static-tree page missing %q", w)
+		}
+	}
+}
+
+func TestBuildPage_PaletteEnabled(t *testing.T) {
+	page := BuildPage("<p>x</p>", "dark", 0, "", false, "", true, "")
+	wants := []string{
+		`id="mdp-palette"`,
+		`id="mdp-palette-input"`,
+		`id="mdp-palette-list"`,
+		"mdpFuzzyMatch",
+		"mdpPaletteOpen",
+		"mdpEnsureTreeData",
+		`e.key !== 'p' && e.key !== 'P'`,
+	}
+	for _, w := range wants {
+		if !strings.Contains(page, w) {
+			t.Errorf("palette-enabled page missing %q", w)
+		}
+	}
+}
+
+func TestBuildPage_PaletteOmittedWithoutFileTree(t *testing.T) {
+	page := BuildPage("<p>x</p>", "dark", 0, "", false, "", false, "")
+	for _, bad := range []string{`id="mdp-palette"`, "mdpFuzzyMatch", "mdpPaletteOpen"} {
+		if strings.Contains(page, bad) {
+			t.Errorf("file-tree-disabled page should not contain palette marker %q", bad)
+		}
+	}
+}
+
 func TestBuildPage_Colemak(t *testing.T) {
-	page := BuildPage("<p>x</p>", "dark", 0, "", true, "")
+	page := BuildPage("<p>x</p>", "dark", 0, "", true, "", false, "")
 	wants := []string{"case 'n':", "case 'e':", "case 'i':", "case 'h':"}
 	for _, want := range wants {
 		if !strings.Contains(page, want) {

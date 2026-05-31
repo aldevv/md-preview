@@ -57,6 +57,317 @@ func vimKeys(colemak, staticReload bool) string {
 	return s
 }
 
+// treeScriptTemplate powers the Tab-toggle file sidebar. __STATIC_TREE_DATA__
+// is filled with a "window.mdpStaticTree = ...;" line in static mode and
+// emptied in WS mode; WS mode fetches /tree on first open instead.
+const treeScriptTemplate = `
+__STATIC_TREE_DATA__
+let mdpTreeIsOpen = false;
+let mdpTreeData = null;
+let mdpTreeExpanded = JSON.parse(sessionStorage.getItem('mdpTreeExpanded') || '[]');
+
+async function mdpEnsureTreeData() {
+  if (mdpTreeData) return mdpTreeData;
+  if (window.mdpStaticTree) { mdpTreeData = window.mdpStaticTree; return mdpTreeData; }
+  try {
+    const r = await fetch('/tree');
+    if (!r.ok) throw new Error('tree fetch failed (' + r.status + ')');
+    mdpTreeData = await r.json();
+  } catch (e) {
+    mdpShowToast('tree unavailable: ' + e.message);
+    return null;
+  }
+  return mdpTreeData;
+}
+
+function mdpCurrentRel(data) {
+  if (!data || !window.mdpCurrentFile) return '';
+  const root = data.root;
+  if (window.mdpCurrentFile === root) return '';
+  if (!window.mdpCurrentFile.startsWith(root + '/')) return '';
+  return window.mdpCurrentFile.slice(root.length + 1);
+}
+
+function mdpBuildTree(data) {
+  const currentRel = mdpCurrentRel(data);
+  const root = { folders: {}, files: [] };
+  for (const rel of (data.files || [])) {
+    const parts = rel.split('/');
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const seg = parts[i];
+      if (!node.folders[seg]) node.folders[seg] = { folders: {}, files: [] };
+      node = node.folders[seg];
+    }
+    node.files.push({ name: parts[parts.length - 1], rel });
+  }
+  if (currentRel) {
+    const segs = currentRel.split('/');
+    let p = '';
+    for (let i = 0; i < segs.length - 1; i++) {
+      p = p ? p + '/' + segs[i] : segs[i];
+      if (!mdpTreeExpanded.includes(p)) mdpTreeExpanded.push(p);
+    }
+    sessionStorage.setItem('mdpTreeExpanded', JSON.stringify(mdpTreeExpanded));
+  }
+  const wrapper = document.createElement('div');
+  wrapper.appendChild(mdpBuildNode(root, '', currentRel));
+  return wrapper;
+}
+
+function mdpBuildNode(node, prefix, currentRel) {
+  const ul = document.createElement('ul');
+  const folderNames = Object.keys(node.folders).sort();
+  for (const name of folderNames) {
+    const folderPath = prefix ? prefix + '/' + name : name;
+    const li = document.createElement('li');
+    li.className = 'mdp-tree-folder';
+    const details = document.createElement('details');
+    if (mdpTreeExpanded.includes(folderPath)) details.open = true;
+    details.addEventListener('toggle', () => {
+      const set = new Set(mdpTreeExpanded);
+      if (details.open) set.add(folderPath); else set.delete(folderPath);
+      mdpTreeExpanded = [...set];
+      sessionStorage.setItem('mdpTreeExpanded', JSON.stringify(mdpTreeExpanded));
+    });
+    const summary = document.createElement('summary');
+    summary.textContent = name;
+    details.appendChild(summary);
+    details.appendChild(mdpBuildNode(node.folders[name], folderPath, currentRel));
+    li.appendChild(details);
+    ul.appendChild(li);
+  }
+  for (const f of node.files) {
+    const li = document.createElement('li');
+    li.className = 'mdp-tree-file';
+    if (f.rel === currentRel) li.classList.add('current');
+    const a = document.createElement('a');
+    a.textContent = f.name;
+    a.href = '#';
+    a.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      mdpTreeNavigate(f.rel);
+    });
+    li.appendChild(a);
+    ul.appendChild(li);
+  }
+  return ul;
+}
+
+function mdpTreeNavigate(rel) {
+  const data = mdpTreeData;
+  if (!data) return;
+  const target = data.root + '/' + rel;
+  if (data.rendered) {
+    const tmp = data.rendered[rel];
+    if (!tmp) { mdpShowToast('not pre-rendered: ' + rel); return; }
+    window.location.href = tmp;
+    return;
+  }
+  fetch('/render', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({file: target})
+  }).then(async (r) => {
+    if (r.ok) {
+      history.pushState({mdpFile: target}, '', '');
+      mdpNavigatedTo(target);
+      mdpToggleTree(false);
+      return;
+    }
+    let msg = 'navigation failed (' + r.status + ')';
+    try { const d = await r.json(); if (d && d.error) msg = d.error; } catch (_) {}
+    mdpShowToast(msg);
+  }).catch((err) => { mdpShowToast('navigation failed: ' + err); });
+}
+
+async function mdpToggleTree(force) {
+  const panel = document.getElementById('mdp-tree');
+  if (!panel) return;
+  const want = (force === true || force === false) ? force : !mdpTreeIsOpen;
+  if (want) {
+    const data = await mdpEnsureTreeData();
+    if (!data) return;
+    const body = panel.querySelector('.mdp-tree-body');
+    body.innerHTML = '';
+    if (!data.files || data.files.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'mdp-tree-empty';
+      empty.textContent = 'No previewable files found.';
+      body.appendChild(empty);
+    } else {
+      body.appendChild(mdpBuildTree(data));
+    }
+    panel.hidden = false;
+    mdpTreeIsOpen = true;
+  } else {
+    panel.hidden = true;
+    mdpTreeIsOpen = false;
+  }
+}
+window.mdpToggleTree = mdpToggleTree;
+
+(function () {
+  const closeBtn = document.querySelector('#mdp-tree .mdp-tree-close');
+  if (closeBtn) closeBtn.addEventListener('click', () => mdpToggleTree(false));
+})();
+
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const tag = (e.target && e.target.tagName) || '';
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (e.target && e.target.isContentEditable) return;
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    mdpToggleTree();
+    return;
+  }
+  if (e.key === 'Escape' && mdpTreeIsOpen) {
+    e.preventDefault();
+    mdpToggleTree(false);
+  }
+});
+
+let mdpPaletteIsOpen = false;
+let mdpPaletteIdx = 0;
+let mdpPaletteMatches = [];
+
+function mdpFuzzyMatch(query, candidate) {
+  if (!query) return { score: 0, hits: [] };
+  const smartCase = /[A-Z]/.test(query);
+  const q = smartCase ? query : query.toLowerCase();
+  const c = smartCase ? candidate : candidate.toLowerCase();
+  const hits = [];
+  let score = 0, qi = 0, lastHit = -2;
+  for (let i = 0; i < c.length && qi < q.length; i++) {
+    if (c[i] !== q[qi]) continue;
+    const prev = i === 0 ? '/' : c[i - 1];
+    const isBoundary = prev === '/' || prev === '_' || prev === '-' || prev === '.';
+    const isConsecutive = i === lastHit + 1;
+    let gain = 1;
+    if (isConsecutive) gain += 3;
+    if (isBoundary) gain += 5;
+    score += gain;
+    hits.push(i);
+    lastHit = i;
+    qi++;
+  }
+  if (qi < q.length) return null;
+  score -= (c.length - hits[hits.length - 1]) * 0.1;
+  return { score, hits };
+}
+
+function mdpPaletteRender(query) {
+  const list = document.getElementById('mdp-palette-list');
+  if (!list) return;
+  const data = mdpTreeData;
+  const files = (data && data.files) || [];
+  let scored;
+  if (!query) {
+    scored = files.slice(0, 50).map((rel) => ({ rel, hits: [] }));
+  } else {
+    const tmp = [];
+    for (const rel of files) {
+      const m = mdpFuzzyMatch(query, rel);
+      if (m) tmp.push({ rel, score: m.score, hits: m.hits });
+    }
+    tmp.sort((a, b) => b.score - a.score || a.rel.localeCompare(b.rel));
+    scored = tmp.slice(0, 50);
+  }
+  mdpPaletteMatches = scored;
+  if (mdpPaletteIdx >= scored.length) mdpPaletteIdx = Math.max(0, scored.length - 1);
+  list.innerHTML = '';
+  scored.forEach((m, i) => {
+    const li = document.createElement('li');
+    li.setAttribute('role', 'option');
+    if (i === mdpPaletteIdx) li.setAttribute('aria-selected', 'true');
+    if (m.hits && m.hits.length) {
+      const set = new Set(m.hits);
+      for (let j = 0; j < m.rel.length; j++) {
+        if (set.has(j)) {
+          const mark = document.createElement('mark');
+          mark.textContent = m.rel[j];
+          li.appendChild(mark);
+        } else {
+          li.appendChild(document.createTextNode(m.rel[j]));
+        }
+      }
+    } else {
+      li.textContent = m.rel;
+    }
+    li.addEventListener('mousedown', (ev) => {
+      ev.preventDefault();
+      mdpPaletteIdx = i;
+      mdpPaletteSubmit();
+    });
+    list.appendChild(li);
+  });
+}
+
+function mdpPaletteSubmit() {
+  const pick = mdpPaletteMatches[mdpPaletteIdx];
+  if (!pick) return;
+  mdpPaletteClose();
+  mdpTreeNavigate(pick.rel);
+}
+
+async function mdpPaletteOpen() {
+  const panel = document.getElementById('mdp-palette');
+  const input = document.getElementById('mdp-palette-input');
+  if (!panel || !input) return;
+  const data = await mdpEnsureTreeData();
+  if (!data) return;
+  mdpPaletteIdx = 0;
+  input.value = '';
+  panel.hidden = false;
+  mdpPaletteIsOpen = true;
+  mdpPaletteRender('');
+  input.focus();
+}
+
+function mdpPaletteClose() {
+  const panel = document.getElementById('mdp-palette');
+  if (!panel) return;
+  panel.hidden = true;
+  mdpPaletteIsOpen = false;
+}
+window.mdpPaletteOpen = mdpPaletteOpen;
+
+document.addEventListener('keydown', (e) => {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+  if (e.key !== 'p' && e.key !== 'P') return;
+  if (e.target && e.target.id === 'mdp-palette-input') return;
+  // swallow browser print
+  e.preventDefault();
+  if (mdpPaletteIsOpen) { mdpPaletteClose(); return; }
+  mdpPaletteOpen();
+});
+
+(function () {
+  const input = document.getElementById('mdp-palette-input');
+  if (!input) return;
+  input.addEventListener('input', () => {
+    mdpPaletteIdx = 0;
+    mdpPaletteRender(input.value);
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); mdpPaletteClose(); return; }
+    if (e.key === 'Enter') { e.preventDefault(); mdpPaletteSubmit(); return; }
+    const isDown = e.key === 'ArrowDown' || (e.ctrlKey && (e.key === 'n' || e.key === 'N'));
+    const isUp = e.key === 'ArrowUp' || (e.ctrlKey && (e.key === 'p' || e.key === 'P'));
+    if (isDown || isUp) {
+      e.preventDefault();
+      const n = mdpPaletteMatches.length;
+      if (!n) return;
+      mdpPaletteIdx = (mdpPaletteIdx + (isDown ? 1 : -1) + n) % n;
+      mdpPaletteRender(input.value);
+      const sel = document.querySelector('#mdp-palette-list li[aria-selected="true"]');
+      if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: 'nearest' });
+    }
+  });
+})();
+`
+
 // __PORT__ is replaced with the server port at runtime.
 const wsScriptTemplate = `
 function absDocTop(el) {
@@ -230,6 +541,7 @@ __EXTRA_CSS__
 <button id="mdp-back" class="mdp-nav-btn" aria-label="Back" title="Back" hidden>&#8249;</button>
 <button id="mdp-fwd" class="mdp-nav-btn" aria-label="Forward" title="Forward" hidden>&#8250;</button>
 </div>
+__TREE_DOM__
 <div id="content" class="markdown-body">
 __BODY__
 </div>
@@ -380,6 +692,7 @@ mdpRenderMath();
 __MERMAID_SCRIPT__
 __MERMAID_INIT__
 __VIM_KEYS__
+__TREE_SCRIPT__
 __WS_SCRIPT__
 </script>
 </body>
@@ -387,8 +700,12 @@ __WS_SCRIPT__
 
 // currentFile is the absolute path the click handler resolves
 // relative hrefs against; empty when no file context applies (ad-hoc
-// RenderBytes callers). wsPort > 0 embeds the WS client.
-func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, currentFile string) string {
+// RenderBytes callers). wsPort > 0 embeds the WS client. fileTree gates
+// the Tab-toggle file sidebar; when false the DOM and script are
+// omitted entirely. staticTreeJSON is the JSON literal embedded as
+// window.mdpStaticTree in static mode (only used when fileTree is on);
+// empty in WS mode (the page fetches /tree on first Tab open).
+func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, currentFile string, fileTree bool, staticTreeJSON string) string {
 	cssVars := CSSDark
 	hljsThemeCSS := hljsThemeDarkCSS
 	if theme == "light" {
@@ -424,6 +741,23 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, cu
 		hljsHighlightCall = "hljs.highlightAll();"
 	}
 
+	treeDOM := ""
+	treeScript := ""
+	if fileTree {
+		treeDOM = `<div id="mdp-tree" hidden>` +
+			`<div class="mdp-tree-header"><span>Files</span>` +
+			`<button class="mdp-tree-close" aria-label="Close" title="Close">&times;</button>` +
+			`</div><div class="mdp-tree-body"></div></div>` +
+			`<div id="mdp-palette" hidden>` +
+			`<input id="mdp-palette-input" type="text" autocomplete="off" spellcheck="false" placeholder="Find file" aria-label="Find file">` +
+			`<ul id="mdp-palette-list" role="listbox"></ul></div>`
+		treeData := ""
+		if staticTreeJSON != "" {
+			treeData = "window.mdpStaticTree = " + staticTreeJSON + ";"
+		}
+		treeScript = strings.ReplaceAll(treeScriptTemplate, "__STATIC_TREE_DATA__", treeData)
+	}
+
 	return strings.NewReplacer(
 		"__HLJS_THEME_CSS__", hljsThemeOut,
 		"__CSS_VARS__", cssVars,
@@ -442,6 +776,8 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, cu
 		"__MERMAID_SCRIPT__", mermaidJSOut,
 		"__MERMAID_INIT__", mermaidInit,
 		"__VIM_KEYS__", vimKeys(colemak, wsPort == 0),
+		"__TREE_DOM__", treeDOM,
+		"__TREE_SCRIPT__", treeScript,
 		"__WS_SCRIPT__", wsScript,
 	).Replace(pageTemplate)
 }
