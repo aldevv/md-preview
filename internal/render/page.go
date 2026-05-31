@@ -21,22 +21,30 @@ const vimKeysScriptTemplate = `
         const tag = el.tagName;
         return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
     }
-    // Hold-to-scroll for d/u: a single press still does the half-page
-    // smooth jump, but as soon as the OS reports e.repeat we switch to a
-    // rAF-driven constant-rate scroll. Smooth-scroll requests stack and
-    // each new one cancels the previous animation mid-flight, which is
-    // why held d/u used to feel like it slowed down.
+    // Hold-to-scroll: a single d/u/f/b press is a smooth half- or
+    // full-page jump. Holding switches to a rAF-driven constant-
+    // velocity scroll. Each call sets its own pxPerFrame so f/b hold
+    // is roughly twice as fast as d/u hold, matching their single-
+    // press semantics. behavior:'auto' per step keeps the motion
+    // linear (no queued smooth animations).
+    const mdpHoldHalfPx = 28;
+    const mdpHoldFullPx = 56;
     let mdpHoldDir = 0;
+    let mdpHoldPx = mdpHoldHalfPx;
     let mdpHoldRAF = null;
     function mdpHoldTick() {
         if (!mdpHoldDir) return;
-        window.scrollBy({ top: mdpHoldDir * 14, behavior: 'auto' });
+        window.scrollBy({ top: mdpHoldDir * mdpHoldPx, behavior: 'auto' });
         mdpHoldRAF = requestAnimationFrame(mdpHoldTick);
     }
-    function mdpStartHold(dir) {
-        if (mdpHoldDir === dir) return;
+    function mdpStartHold(dir, pxPerFrame) {
+        if (mdpHoldDir === dir && mdpHoldPx === pxPerFrame) return;
         mdpStopHold();
+        // Cancel any in-flight smooth scroll from the single-press
+        // handler so it doesn't interleave with the rAF-driven steps.
+        window.scrollTo({ top: window.scrollY, behavior: 'auto' });
         mdpHoldDir = dir;
+        mdpHoldPx = pxPerFrame;
         mdpHoldRAF = requestAnimationFrame(mdpHoldTick);
     }
     function mdpStopHold() {
@@ -53,12 +61,20 @@ const vimKeysScriptTemplate = `
             case 'h':         window.scrollBy({ left: -STEP, behavior: 'auto' }); break;
             case '__RIGHT__': window.scrollBy({ left:  STEP, behavior: 'auto' }); break;
             case 'd':
-                if (e.repeat) mdpStartHold(1);
+                if (e.repeat) mdpStartHold(1, mdpHoldHalfPx);
                 else window.scrollBy({ top:  h / 2, behavior: 'smooth' });
                 break;
             case 'u':
-                if (e.repeat) mdpStartHold(-1);
+                if (e.repeat) mdpStartHold(-1, mdpHoldHalfPx);
                 else window.scrollBy({ top: -h / 2, behavior: 'smooth' });
+                break;
+            case 'f':
+                if (e.repeat) mdpStartHold(1, mdpHoldFullPx);
+                else window.scrollBy({ top:  h, behavior: 'smooth' });
+                break;
+            case 'b':
+                if (e.repeat) mdpStartHold(-1, mdpHoldFullPx);
+                else window.scrollBy({ top: -h, behavior: 'smooth' });
                 break;
             case 'g': window.scrollTo({ top: 0, behavior: 'smooth' }); break;
             case 'G': window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' }); break;
@@ -71,7 +87,7 @@ const vimKeysScriptTemplate = `
         e.preventDefault();
     });
     document.addEventListener('keyup', (e) => {
-        if (e.key === 'd' || e.key === 'u') mdpStopHold();
+        if (e.key === 'd' || e.key === 'u' || e.key === 'f' || e.key === 'b') mdpStopHold();
     });
     window.addEventListener('blur', mdpStopHold);
 })();

@@ -78,6 +78,7 @@ closes with it (chrome `--app=` mode) or shows a "server stopped" notice.
 | Down / Up         | `j` / `k` | `n` / `e` |
 | Left / Right      | `h` / `l` | `h` / `i` |
 | Half-page down/up | `d` / `u` | `d` / `u` |
+| Full-page down/up | `f` / `b` | `f` / `b` |
 | Top / Bottom      | `g` / `G` | `g` / `G` |
 | History back      | `H`       | `H`       |
 | History forward   | `L`       | `I`       |
