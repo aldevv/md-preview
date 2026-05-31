@@ -182,6 +182,33 @@ func BrowserCmd(browser any, url string, lookPath func(string) (string, error), 
 	}
 }
 
+// IsChromiumApp returns true when argv launches a chromium-family browser
+// in --app= mode (the chromeless single-window UX the native fallback is
+// trying to approximate). False for Firefox-family, xdg-open/open
+// fallbacks, and any user-configured browser without --app=.
+func IsChromiumApp(argv []string) bool {
+	if len(argv) == 0 {
+		return false
+	}
+	hasApp := false
+	for _, a := range argv[1:] {
+		if strings.HasPrefix(a, "--app=") {
+			hasApp = true
+			break
+		}
+	}
+	if !hasApp {
+		return false
+	}
+	bin := strings.ToLower(filepath.Base(argv[0]))
+	for _, n := range []string{"chrome", "chromium", "brave", "edge", "vivaldi"} {
+		if strings.Contains(bin, n) {
+			return true
+		}
+	}
+	return false
+}
+
 // autoBrowserFamilies lists browsers we know how to launch with a useful flag,
 // in preference order. Chromium-family wins because --app= gives a chromeless
 // single-window UX; Firefox-family is a normal new window since there's no

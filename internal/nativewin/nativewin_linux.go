@@ -3,10 +3,13 @@
 package nativewin
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
+	"syscall"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
@@ -16,7 +19,23 @@ const (
 	gtkWindowToplevel                = 0
 	webkitHardwareAccelerationAlways = 0
 	webkitCacheModelWebBrowser       = 2
+	// WebKitLoadEvent enum (webkit2/WebKitLoadEvent).
+	webkitLoadStarted    = 0
+	webkitLoadRedirected = 1
+	webkitLoadCommitted  = 2
+	webkitLoadFinished   = 3
 )
+
+// init pre-warms the dlopen so the first user-facing Open() doesn't
+// pay the ~50-200ms libwebkit2gtk + libgtk + libgobject load cost on
+// the hot path. Skipped when the user opted out of the native window;
+// in that case Open() is never reached anyway.
+func init() {
+	if v := os.Getenv("MDP_NATIVE"); v == "0" || v == "false" {
+		return
+	}
+	go loadOnce.Do(func() { loadErr = dlopenAll() })
+}
 
 var (
 	loadOnce sync.Once
@@ -34,6 +53,7 @@ var (
 	webkitWebViewLoadURI                        func(view uintptr, uri string)
 	webkitWebViewGetSettings                    func(view uintptr) uintptr
 	webkitWebViewGetContext                     func(view uintptr) uintptr
+	webkitWebViewSetBackgroundColor             func(view uintptr, rgba uintptr)
 	webkitSettingsSetHardwareAccelerationPolicy func(settings uintptr, policy int32)
 	webkitSettingsSetEnableSmoothScrolling      func(settings uintptr, enabled int32)
 	webkitWebContextSetCacheModel               func(ctx uintptr, model int32)
@@ -82,6 +102,7 @@ func dlopenAll() error {
 	purego.RegisterLibFunc(&webkitWebViewLoadURI, libwebkit, "webkit_web_view_load_uri")
 	purego.RegisterLibFunc(&webkitWebViewGetSettings, libwebkit, "webkit_web_view_get_settings")
 	purego.RegisterLibFunc(&webkitWebViewGetContext, libwebkit, "webkit_web_view_get_context")
+	purego.RegisterLibFunc(&webkitWebViewSetBackgroundColor, libwebkit, "webkit_web_view_set_background_color")
 	purego.RegisterLibFunc(&webkitSettingsSetHardwareAccelerationPolicy, libwebkit, "webkit_settings_set_hardware_acceleration_policy")
 	purego.RegisterLibFunc(&webkitSettingsSetEnableSmoothScrolling, libwebkit, "webkit_settings_set_enable_smooth_scrolling")
 	purego.RegisterLibFunc(&webkitWebContextSetCacheModel, libwebkit, "webkit_web_context_set_cache_model")
@@ -109,12 +130,84 @@ func Available() bool {
 	return availOK
 }
 
+// gdkRGBA mirrors the GTK GdkRGBA struct (4 gdouble fields) so we can
+// hand WebKit a background color pointer via purego.
+type gdkRGBA struct {
+	Red, Green, Blue, Alpha float64
+}
+
+// filterWebKitStderr redirects fd 2 through a pipe and drops a tiny
+// allow-list of well-known JSC noise lines. Returns a restore function
+// that closes the pipe and points fd 2 back at the original stderr.
+// Anything not matched is forwarded verbatim, so panics and real
+// errors still reach the user.
+func filterWebKitStderr() (restore func()) {
+	origFD, err := syscall.Dup(2)
+	if err != nil {
+		return func() {}
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		_ = syscall.Close(origFD)
+		return func() {}
+	}
+	if err := syscall.Dup2(int(w.Fd()), 2); err != nil {
+		_ = r.Close()
+		_ = w.Close()
+		_ = syscall.Close(origFD)
+		return func() {}
+	}
+	_ = w.Close()
+	origStderr := os.NewFile(uintptr(origFD), "stderr-orig")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sc := bufio.NewScanner(r)
+		sc.Buffer(make([]byte, 0, 4096), 1<<20)
+		for sc.Scan() {
+			line := sc.Text()
+			if dropJSCNoise(line) {
+				continue
+			}
+			fmt.Fprintln(origStderr, line)
+		}
+	}()
+	return func() {
+		_ = syscall.Dup2(origFD, 2)
+		_ = syscall.Close(origFD)
+		_ = r.Close()
+		<-done
+	}
+}
+
+func dropJSCNoise(s string) bool {
+	switch {
+	case strings.HasPrefix(s, "ERROR: invalid option: JSC_SIGNAL_FOR_GC="):
+		return true
+	case strings.HasPrefix(s, "Overriding existing handler for signal "):
+		return true
+	}
+	return false
+}
+
 func Open(opts Options) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
+	restore := filterWebKitStderr()
+	defer restore()
+
 	// Speeds up JSC JIT tier-up; noticeable on the wasm cold path.
 	_ = os.Setenv("JSC_jitPolicyScale", "0.1")
+	// JSC installs SIGUSR1 (signal 10) for GC by default and collides
+	// with Go's runtime handlers ("Overriding existing handler for
+	// signal 10"). JSC's signal-selection code reads JSC_SIGNAL_FOR_GC
+	// (upper-case, contrary to its sibling JSC_* options) and accepts
+	// a signal number. SIGUSR2 (12) also clashes with Go; real-time
+	// signals don't. SIGRTMIN is usually 34 on glibc Linux with 32-33
+	// reserved, so 35 is a safe slot.
+	_ = os.Unsetenv("JSC_signalForGC")
+	_ = os.Setenv("JSC_SIGNAL_FOR_GC", "35")
 
 	loadOnce.Do(func() { loadErr = dlopenAll() })
 	if loadErr != nil {
@@ -139,6 +232,27 @@ func Open(opts Options) error {
 
 	webkitWebContextSetCacheModel(webkitWebViewGetContext(view), webkitCacheModelWebBrowser)
 
+	// Paint the WebKit viewport with the GitHub-dark background before
+	// the first frame so the window doesn't flash white during the
+	// load. Matches --color-bg-primary in the page CSS.
+	bg := gdkRGBA{Red: 13.0 / 255, Green: 17.0 / 255, Blue: 23.0 / 255, Alpha: 1.0}
+	webkitWebViewSetBackgroundColor(view, uintptr(unsafe.Pointer(&bg)))
+
+	// Defer the window show until WebKit reports the first byte
+	// committed so the user doesn't see GTK's white pre-paint nor the
+	// brief WebKit blank frame before the page lands. file:// loads
+	// commit in single-digit ms; if the page never commits (broken
+	// URL) the window stays hidden, which is the correct signal.
+	shown := false
+	loadCB := purego.NewCallback(func(_view, event, _data uintptr) uintptr {
+		if !shown && event == webkitLoadCommitted {
+			gtkWidgetShowAll(window)
+			shown = true
+		}
+		return 0
+	})
+	gSignalConnectData(view, "load-changed", loadCB, 0, 0, 0)
+
 	webkitWebViewLoadURI(view, opts.URL)
 
 	destroyCB := purego.NewCallback(func(_ uintptr, _ uintptr) uintptr {
@@ -147,7 +261,6 @@ func Open(opts Options) error {
 	})
 	gSignalConnectData(window, "destroy", destroyCB, 0, 0, 0)
 
-	gtkWidgetShowAll(window)
 	gtkMain()
 	return nil
 }

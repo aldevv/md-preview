@@ -98,10 +98,16 @@ func main() {
 
 const usage = `Usage: mdp [flags] [file]
 
-Render a markdown file in a browser.
+Render a markdown file in a chromeless native window (or browser).
 
 If no file is given, mdp uses fzf to pick one interactively. fzf must be
 on PATH for the picker, pass a file argument otherwise.
+
+By default mdp opens a native GTK/WebKit (Linux) or Cocoa (macOS) window.
+Set MDP_NATIVE=0 to force the browser path instead. If the native window
+runtime is missing, mdp falls back to a chromium-family browser; if none
+is installed, the first available browser is used and a one-time banner
+suggests installing one for independent windows.
 
 Flags:
   -e, --edit       Also open the file in nvim after launching the preview
@@ -124,10 +130,12 @@ Subcommands:
                                     reference (for Claude Code skills and
                                     other automation driving mdp).
   mdp serve <file> <port> <theme>   Start the preview server (used by the
-                                    md-preview.nvim Neovim plugin).
+                                    md-preview.nvim Neovim plugin). Run
+                                    directly in a TTY to also get a
+                                    native window.
 `
 
-func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) int {
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer, env Environment) int {
 	if err := config.EnsureDefault(); err != nil {
 		fmt.Fprintf(stderr, "mdp: seeding default config: %v\n", err)
 	}
@@ -135,7 +143,7 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 	if len(args) > 0 {
 		switch args[0] {
 		case "serve":
-			return runServe(args[1:], stderr)
+			return runServe(args[1:], stdin, stderr, env)
 		case "watch":
 			return runWatchSubcommand(args[1:], stdout, stderr, env)
 		case "skill":
@@ -176,9 +184,8 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 		return 0
 	}
 
-	argv := config.BrowserCmd(rc.cfg.Browser, "file://"+tmpPath, env.LookPath, env.GOOS, stderr)
-	if err := env.Spawn(argv); err != nil {
-		fmt.Fprintf(stderr, "mdp: launching browser: %v\n", err)
+	url := "file://" + tmpPath
+	if !openPreview(url, rc.cfg, env, stderr) {
 		return 1
 	}
 
@@ -186,6 +193,53 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer, env Environment) 
 		return 0
 	}
 	return maybeOpenEditor(rc.src, env, stderr)
+}
+
+// openPreview opens url in the native window when available (and not
+// disabled via MDP_NATIVE=0), otherwise spawns the configured browser.
+// On non-chromium fallback we append #mdp-install-chrome so the page
+// surfaces the install banner the first time. Returns false on error.
+func openPreview(url string, cfg config.Config, env Environment, stderr io.Writer) bool {
+	if wantNative() && env.OpenWindow != nil {
+		if err := env.OpenWindow(url); err == nil {
+			return true
+		} else if err != nativewin.ErrUnsupported {
+			fmt.Fprintf(stderr, "mdp: native window unavailable (%v); falling back to browser\n", err)
+		}
+	}
+	argv := config.BrowserCmd(cfg.Browser, url, env.LookPath, env.GOOS, stderr)
+	if !config.IsChromiumApp(argv) {
+		argv = withInstallHash(argv)
+	}
+	if err := env.Spawn(argv); err != nil {
+		fmt.Fprintf(stderr, "mdp: launching browser: %v\n", err)
+		return false
+	}
+	return true
+}
+
+// withInstallHash returns a copy of argv with #mdp-install-chrome
+// appended to the URL (the last element of argv per BrowserCmd's
+// convention).
+func withInstallHash(argv []string) []string {
+	if len(argv) == 0 {
+		return argv
+	}
+	out := make([]string, len(argv))
+	copy(out, argv)
+	last := len(out) - 1
+	if !strings.Contains(out[last], "#") {
+		out[last] = out[last] + "#mdp-install-chrome"
+	}
+	return out
+}
+
+// wantNative returns false only when MDP_NATIVE is explicitly disabled
+// (0/false). The native window is the default; the env var is the
+// opt-out.
+func wantNative() bool {
+	v := os.Getenv("MDP_NATIVE")
+	return v != "0" && v != "false"
 }
 
 type runFlags struct {
@@ -507,21 +561,19 @@ func runWatchSubcommand(args []string, stdout, stderr io.Writer, env Environment
 		ExtraCSS: config.ExtraCSS(rc.cfg, stderr),
 	}
 
-	if envFlagOn("MDP_NATIVE") && env.OpenWindow != nil {
+	if wantNative() && env.OpenWindow != nil {
 		return runWatchWithNativeWindow(opts, rc.cfg, env, stderr)
 	}
 	return runWatchWithBrowser(opts, rc.cfg, env, stderr)
-}
-
-func envFlagOn(name string) bool {
-	v := os.Getenv(name)
-	return v == "1" || v == "true"
 }
 
 func runWatchWithBrowser(opts server.Options, cfg config.Config, env Environment, stderr io.Writer) int {
 	opts.OnListen = func(port int) {
 		url := fmt.Sprintf("http://localhost:%d/", port)
 		argv := config.BrowserCmd(cfg.Browser, url, env.LookPath, env.GOOS, stderr)
+		if !config.IsChromiumApp(argv) {
+			argv = withInstallHash(argv)
+		}
 		if err := env.Spawn(argv); err != nil {
 			fmt.Fprintf(stderr, "mdp: launching browser: %v\n", err)
 		}
@@ -548,6 +600,9 @@ func runWatchWithNativeWindow(opts server.Options, cfg config.Config, env Enviro
 		if err := env.OpenWindow(url); err != nil {
 			fmt.Fprintf(stderr, "mdp: native window unavailable (%v); falling back to browser\n", err)
 			argv := config.BrowserCmd(cfg.Browser, url, env.LookPath, env.GOOS, stderr)
+			if !config.IsChromiumApp(argv) {
+				argv = withInstallHash(argv)
+			}
 			if e2 := env.Spawn(argv); e2 != nil {
 				fmt.Fprintf(stderr, "mdp: launching browser: %v\n", e2)
 				return 1
@@ -580,7 +635,7 @@ func runWatchWithNativeWindow(opts server.Options, cfg config.Config, env Enviro
 }
 
 // MDP_COLEMAK=1 in the environment overrides config.toml's colemak flag.
-func runServe(args []string, stderr io.Writer) int {
+func runServe(args []string, stdin io.Reader, stderr io.Writer, env Environment) int {
 	if len(args) < 3 {
 		fmt.Fprintln(stderr, "Usage: mdp serve <file> <port> <theme>")
 		return 1
@@ -605,17 +660,85 @@ func runServe(args []string, stderr io.Writer) int {
 		}
 	}
 	opts := server.Options{
-		File:     args[0],
-		Port:     port,
-		Theme:    args[2],
-		Colemak:  colemak,
+		File:        args[0],
+		Port:        port,
+		Theme:       args[2],
+		Colemak:     colemak,
 		FileTree:    cfg.FileTree,
 		FuzzyFinder: cfg.FuzzyFinder,
-		ExtraCSS: config.ExtraCSS(cfg, stderr),
+		ExtraCSS:    config.ExtraCSS(cfg, stderr),
+	}
+	// Direct-shell invocations (stdin is a TTY) get the native window
+	// like plain mdp/watch. The nvim plugin spawns mdp serve with a
+	// pipe on stdin and opens its own browser, so we leave that path
+	// untouched.
+	if stdinIsTTY(stdin) && wantNative() && env.OpenWindow != nil {
+		return runServeWithNativeWindow(opts, cfg, env, stderr)
 	}
 	if err := server.Run(opts); err != nil {
 		fmt.Fprintf(stderr, "mdp serve: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+func stdinIsTTY(r io.Reader) bool {
+	f, ok := r.(*os.File)
+	if !ok {
+		return false
+	}
+	stat, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return (stat.Mode() & os.ModeCharDevice) != 0
+}
+
+func runServeWithNativeWindow(opts server.Options, cfg config.Config, env Environment, stderr io.Writer) int {
+	listenCh := make(chan int, 1)
+	prevOnListen := opts.OnListen
+	opts.OnListen = func(port int) {
+		if prevOnListen != nil {
+			prevOnListen(port)
+		}
+		listenCh <- port
+	}
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- env.RunServer(opts) }()
+
+	select {
+	case port := <-listenCh:
+		url := fmt.Sprintf("http://localhost:%d/", port)
+		if err := env.OpenWindow(url); err != nil {
+			fmt.Fprintf(stderr, "mdp: native window unavailable (%v); falling back to browser\n", err)
+			argv := config.BrowserCmd(cfg.Browser, url, env.LookPath, env.GOOS, stderr)
+			if !config.IsChromiumApp(argv) {
+				argv = withInstallHash(argv)
+			}
+			if e2 := env.Spawn(argv); e2 != nil {
+				fmt.Fprintf(stderr, "mdp: launching browser: %v\n", e2)
+				return 1
+			}
+			if err := <-serverDone; err != nil {
+				fmt.Fprintf(stderr, "mdp serve: %v\n", err)
+				return 1
+			}
+			return 0
+		}
+		select {
+		case err := <-serverDone:
+			if err != nil {
+				fmt.Fprintf(stderr, "mdp serve: %v\n", err)
+				return 1
+			}
+		default:
+		}
+		return 0
+	case err := <-serverDone:
+		if err != nil {
+			fmt.Fprintf(stderr, "mdp serve: %v\n", err)
+			return 1
+		}
+		return 0
+	}
 }

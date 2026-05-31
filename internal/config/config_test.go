@@ -475,6 +475,33 @@ func TestBrowserCmd_AutoExplicit(t *testing.T) {
 	}
 }
 
+func TestIsChromiumApp(t *testing.T) {
+	cases := []struct {
+		name string
+		argv []string
+		want bool
+	}{
+		{"chrome with --app=", []string{"/usr/bin/google-chrome", "--app=https://x"}, true},
+		{"chromium with --app=", []string{"/usr/bin/chromium", "--app=https://x"}, true},
+		{"brave with --app=", []string{"/usr/bin/brave-browser", "--app=https://x"}, true},
+		{"vivaldi with --app=", []string{"/usr/bin/vivaldi", "--app=https://x"}, true},
+		{"edge with --app=", []string{"/usr/bin/microsoft-edge", "--app=https://x"}, true},
+		{"chrome without --app=", []string{"/usr/bin/google-chrome", "https://x"}, false},
+		{"firefox with --new-window", []string{"/usr/bin/firefox", "--new-window", "https://x"}, false},
+		{"xdg-open", []string{"/usr/bin/xdg-open", "https://x"}, false},
+		{"open (mac)", []string{"open", "https://x"}, false},
+		{"empty", nil, false},
+		{"single-element", []string{"/usr/bin/google-chrome"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsChromiumApp(tc.argv); got != tc.want {
+				t.Errorf("IsChromiumApp(%v) = %v, want %v", tc.argv, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestFzfPick_NotInstalled(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	_, err := FzfPick(t.Context(), t.TempDir())

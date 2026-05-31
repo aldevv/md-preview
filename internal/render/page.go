@@ -596,6 +596,7 @@ __FINDER_DOM__
 __BODY__
 </div>
 <div id="mdp-toast" hidden></div>
+<div id="mdp-install-toast" hidden>Install Chromium-based browser for independent windows</div>
 <script>
 window.mdpCurrentFile = __CURRENT_FILE_JS__;
 function mdpFormatTitle(path) {
@@ -704,6 +705,27 @@ function mdpShowToast(msg) {
   }, 3000);
 }
 window.mdpShowToast = mdpShowToast;
+// Hash-triggered install-chrome toast. Caller appends
+// #mdp-install-chrome to the URL when falling back to a non-chromium
+// browser; we surface the banner once (localStorage-gated) for 5s,
+// then strip the hash so reloads/back-forward don't replay it.
+(function () {
+  if (window.location.hash !== '#mdp-install-chrome') return;
+  history.replaceState(null, '', window.location.pathname + window.location.search);
+  let seen = false;
+  try { seen = localStorage.getItem('mdpInstallToastSeen') === '1'; } catch (_) {}
+  if (seen) return;
+  try { localStorage.setItem('mdpInstallToastSeen', '1'); } catch (_) {}
+  const el = document.getElementById('mdp-install-toast');
+  if (!el) return;
+  el.hidden = false;
+  void el.offsetWidth;
+  el.classList.add('visible');
+  setTimeout(() => {
+    el.classList.remove('visible');
+    setTimeout(() => { el.hidden = true; }, 250);
+  }, 5000);
+})();
 // mdpStaticToast is the target of javascript:... hrefs that static
 // mode emits for links it can't honour (out-of-tree, missing,
 // unsupported, over-cap). The payload is URI-encoded; decode and
