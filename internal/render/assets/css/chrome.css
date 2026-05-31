@@ -158,14 +158,25 @@ body:has(#mdp-nav-bar:not([hidden])) {
   padding-left: 14px;
 }
 
-.mdp-tree-folder > details > summary {
+.mdp-tree-folder > .mdp-tree-summary {
   cursor: pointer;
   padding: 3px 12px;
   color: var(--color-text-secondary);
   user-select: none;
   font-weight: 500;
 }
-.mdp-tree-folder > details > summary:hover {
+.mdp-tree-folder > .mdp-tree-summary::before {
+  content: "▶";
+  display: inline-block;
+  width: 1em;
+  font-size: 0.65em;
+  margin-right: 2px;
+  transition: transform 0.1s ease-out;
+}
+.mdp-tree-folder > .mdp-tree-summary.open::before {
+  transform: rotate(90deg);
+}
+.mdp-tree-folder > .mdp-tree-summary:hover {
   background: var(--color-bg-inline-code);
 }
 

@@ -194,19 +194,28 @@ function mdpBuildNode(node, prefix, currentRel) {
     const folderPath = prefix ? prefix + '/' + name : name;
     const li = document.createElement('li');
     li.className = 'mdp-tree-folder';
-    const details = document.createElement('details');
-    if (mdpTreeExpanded.includes(folderPath)) details.open = true;
-    details.addEventListener('toggle', () => {
+    // Hand-rolled disclosure (div + click) instead of <details>/<summary>:
+    // Tab key + dynamically-inserted <details> crashes chrome's renderer
+    // (V8 SIGILL on chrome 148, reproduces in a single-handler 30-line
+    // page). Plain divs avoid chrome's focus traversal touching them.
+    const summary = document.createElement('div');
+    summary.className = 'mdp-tree-summary';
+    summary.textContent = name;
+    const childUL = mdpBuildNode(node.folders[name], folderPath, currentRel);
+    const initialOpen = mdpTreeExpanded.includes(folderPath);
+    childUL.hidden = !initialOpen;
+    if (initialOpen) summary.classList.add('open');
+    summary.addEventListener('click', () => {
+      const nowOpen = childUL.hidden;
+      childUL.hidden = !nowOpen;
+      summary.classList.toggle('open', nowOpen);
       const set = new Set(mdpTreeExpanded);
-      if (details.open) set.add(folderPath); else set.delete(folderPath);
+      if (nowOpen) set.add(folderPath); else set.delete(folderPath);
       mdpTreeExpanded = [...set];
       sessionStorage.setItem('mdpTreeExpanded', JSON.stringify(mdpTreeExpanded));
     });
-    const summary = document.createElement('summary');
-    summary.textContent = name;
-    details.appendChild(summary);
-    details.appendChild(mdpBuildNode(node.folders[name], folderPath, currentRel));
-    li.appendChild(details);
+    li.appendChild(summary);
+    li.appendChild(childUL);
     ul.appendChild(li);
   }
   for (const f of node.files) {
