@@ -603,7 +603,7 @@ function mdpFormatTitle(path) {
   const parts = path.split('/').filter(Boolean);
   const base = parts[parts.length - 1] || path;
   const parent = parts.length >= 2 ? parts[parts.length - 2] : '';
-  return parent ? base + ' - ' + parent : base;
+  return parent ? parent + '/' + base : base;
 }
 window.mdpFormatTitle = mdpFormatTitle;
 // mdpStack + mdpIdx track the user's nav path so back/forward
@@ -844,7 +844,7 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, cu
 	).Replace(pageTemplate)
 }
 
-// titleFor formats the preview window title as "basename - parent",
+// titleFor formats the preview window title as "parent/basename",
 // falling back to "md-preview" when no file context applies (ad-hoc
 // RenderBytes callers).
 func titleFor(currentFile string) string {
@@ -856,7 +856,7 @@ func titleFor(currentFile string) string {
 	if parent == "" || parent == "." || parent == "/" {
 		return base
 	}
-	return base + " - " + parent
+	return parent + "/" + base
 }
 
 func hasMermaid(body string) bool {
