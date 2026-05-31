@@ -8,9 +8,11 @@ import (
 )
 
 // __DOWN__/__UP__/__RIGHT__ are replaced with j/k/l (qwerty) or n/e/i
-// (colemak); h, d/u, g/G, q are layout-stable. __RELOAD_CASE__ becomes
-// the `r` reload binding in static mode and is stripped in WS-backed
-// modes, which drive their own refresh.
+// (colemak); h, d/u, g/G, q are layout-stable. __FWD__ is the shifted
+// right key (qwerty L, colemak I) that drives nav history forward;
+// shifted h (H) is layout-stable for back. __RELOAD_CASE__ becomes the
+// `r` reload binding in static mode and is stripped in WS-backed modes,
+// which drive their own refresh.
 const vimKeysScriptTemplate = `
 (() => {
     const STEP = 60;
@@ -18,6 +20,28 @@ const vimKeysScriptTemplate = `
         if (!el) return false;
         const tag = el.tagName;
         return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+    }
+    // Hold-to-scroll for d/u: a single press still does the half-page
+    // smooth jump, but as soon as the OS reports e.repeat we switch to a
+    // rAF-driven constant-rate scroll. Smooth-scroll requests stack and
+    // each new one cancels the previous animation mid-flight, which is
+    // why held d/u used to feel like it slowed down.
+    let mdpHoldDir = 0;
+    let mdpHoldRAF = null;
+    function mdpHoldTick() {
+        if (!mdpHoldDir) return;
+        window.scrollBy({ top: mdpHoldDir * 14, behavior: 'auto' });
+        mdpHoldRAF = requestAnimationFrame(mdpHoldTick);
+    }
+    function mdpStartHold(dir) {
+        if (mdpHoldDir === dir) return;
+        mdpStopHold();
+        mdpHoldDir = dir;
+        mdpHoldRAF = requestAnimationFrame(mdpHoldTick);
+    }
+    function mdpStopHold() {
+        mdpHoldDir = 0;
+        if (mdpHoldRAF) { cancelAnimationFrame(mdpHoldRAF); mdpHoldRAF = null; }
     }
     document.addEventListener('keydown', (e) => {
         if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -28,16 +52,28 @@ const vimKeysScriptTemplate = `
             case '__UP__':    window.scrollBy({ top: -STEP, behavior: 'auto' }); break;
             case 'h':         window.scrollBy({ left: -STEP, behavior: 'auto' }); break;
             case '__RIGHT__': window.scrollBy({ left:  STEP, behavior: 'auto' }); break;
-            case 'd': window.scrollBy({ top:  h / 2, behavior: 'smooth' }); break;
-            case 'u': window.scrollBy({ top: -h / 2, behavior: 'smooth' }); break;
+            case 'd':
+                if (e.repeat) mdpStartHold(1);
+                else window.scrollBy({ top:  h / 2, behavior: 'smooth' });
+                break;
+            case 'u':
+                if (e.repeat) mdpStartHold(-1);
+                else window.scrollBy({ top: -h / 2, behavior: 'smooth' });
+                break;
             case 'g': window.scrollTo({ top: 0, behavior: 'smooth' }); break;
             case 'G': window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' }); break;
+            case 'H': if (typeof mdpGoBack === 'function') mdpGoBack(); else return; break;
+            case '__FWD__': if (typeof mdpGoForward === 'function') mdpGoForward(); else return; break;
             case 'q': window.close(); break;
             __RELOAD_CASE__
             default: return;
         }
         e.preventDefault();
     });
+    document.addEventListener('keyup', (e) => {
+        if (e.key === 'd' || e.key === 'u') mdpStopHold();
+    });
+    window.addEventListener('blur', mdpStopHold);
 })();
 `
 
@@ -49,6 +85,7 @@ func vimKeys(colemak, staticReload bool) string {
 	s := strings.ReplaceAll(vimKeysScriptTemplate, "__DOWN__", down)
 	s = strings.ReplaceAll(s, "__UP__", up)
 	s = strings.ReplaceAll(s, "__RIGHT__", right)
+	s = strings.ReplaceAll(s, "__FWD__", strings.ToUpper(right))
 	reloadCase := ""
 	if staticReload {
 		reloadCase = "case 'r': location.reload(); break;"
@@ -57,14 +94,14 @@ func vimKeys(colemak, staticReload bool) string {
 	return s
 }
 
-// treeScriptTemplate powers the Tab-toggle file sidebar. __STATIC_TREE_DATA__
-// is filled with a "window.mdpStaticTree = ...;" line in static mode and
-// emptied in WS mode; WS mode fetches /tree on first open instead.
-const treeScriptTemplate = `
+// sharedNavScriptTemplate carries the data + navigation primitives that
+// both the Tab sidebar and the Ctrl+P fuzzy finder consume. Emitted whenever
+// either UI is on. __STATIC_TREE_DATA__ holds the "window.mdpStaticTree =
+// ...;" injection in static mode; empty in WS mode (the page fetches
+// /tree on first open).
+const sharedNavScriptTemplate = `
 __STATIC_TREE_DATA__
-let mdpTreeIsOpen = false;
 let mdpTreeData = null;
-let mdpTreeExpanded = JSON.parse(sessionStorage.getItem('mdpTreeExpanded') || '[]');
 
 async function mdpEnsureTreeData() {
   if (mdpTreeData) return mdpTreeData;
@@ -87,6 +124,41 @@ function mdpCurrentRel(data) {
   if (!window.mdpCurrentFile.startsWith(root + '/')) return '';
   return window.mdpCurrentFile.slice(root.length + 1);
 }
+
+function mdpTreeNavigate(rel) {
+  const data = mdpTreeData;
+  if (!data) return;
+  const target = data.root + '/' + rel;
+  if (data.rendered) {
+    const tmp = data.rendered[rel];
+    if (!tmp) { mdpShowToast('not pre-rendered: ' + rel); return; }
+    window.location.href = tmp;
+    return;
+  }
+  fetch('/render', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({file: target})
+  }).then(async (r) => {
+    if (r.ok) {
+      history.pushState({mdpFile: target}, '', '');
+      mdpNavigatedTo(target);
+      if (typeof mdpToggleTree === 'function') mdpToggleTree(false);
+      return;
+    }
+    let msg = 'navigation failed (' + r.status + ')';
+    try { const d = await r.json(); if (d && d.error) msg = d.error; } catch (_) {}
+    mdpShowToast(msg);
+  }).catch((err) => { mdpShowToast('navigation failed: ' + err); });
+}
+`
+
+// treeScriptTemplate powers the Tab-toggle file sidebar. Depends on
+// sharedNavScriptTemplate (mdpEnsureTreeData, mdpTreeNavigate); always
+// emitted together.
+const treeScriptTemplate = `
+let mdpTreeIsOpen = false;
+let mdpTreeExpanded = JSON.parse(sessionStorage.getItem('mdpTreeExpanded') || '[]');
 
 function mdpBuildTree(data) {
   const currentRel = mdpCurrentRel(data);
@@ -154,33 +226,6 @@ function mdpBuildNode(node, prefix, currentRel) {
   return ul;
 }
 
-function mdpTreeNavigate(rel) {
-  const data = mdpTreeData;
-  if (!data) return;
-  const target = data.root + '/' + rel;
-  if (data.rendered) {
-    const tmp = data.rendered[rel];
-    if (!tmp) { mdpShowToast('not pre-rendered: ' + rel); return; }
-    window.location.href = tmp;
-    return;
-  }
-  fetch('/render', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({file: target})
-  }).then(async (r) => {
-    if (r.ok) {
-      history.pushState({mdpFile: target}, '', '');
-      mdpNavigatedTo(target);
-      mdpToggleTree(false);
-      return;
-    }
-    let msg = 'navigation failed (' + r.status + ')';
-    try { const d = await r.json(); if (d && d.error) msg = d.error; } catch (_) {}
-    mdpShowToast(msg);
-  }).catch((err) => { mdpShowToast('navigation failed: ' + err); });
-}
-
 async function mdpToggleTree(force) {
   const panel = document.getElementById('mdp-tree');
   if (!panel) return;
@@ -227,10 +272,14 @@ document.addEventListener('keydown', (e) => {
     mdpToggleTree(false);
   }
 });
+`
 
-let mdpPaletteIsOpen = false;
-let mdpPaletteIdx = 0;
-let mdpPaletteMatches = [];
+// finderScriptTemplate powers the Ctrl+P fuzzy file finder. Depends on
+// sharedNavScriptTemplate (mdpEnsureTreeData, mdpTreeNavigate).
+const finderScriptTemplate = `
+let mdpFinderIsOpen = false;
+let mdpFinderIdx = 0;
+let mdpFinderMatches = [];
 
 function mdpFuzzyMatch(query, candidate) {
   if (!query) return { score: 0, hits: [] };
@@ -257,8 +306,8 @@ function mdpFuzzyMatch(query, candidate) {
   return { score, hits };
 }
 
-function mdpPaletteRender(query) {
-  const list = document.getElementById('mdp-palette-list');
+function mdpFinderRender(query) {
+  const list = document.getElementById('mdp-finder-list');
   if (!list) return;
   const data = mdpTreeData;
   const files = (data && data.files) || [];
@@ -274,13 +323,13 @@ function mdpPaletteRender(query) {
     tmp.sort((a, b) => b.score - a.score || a.rel.localeCompare(b.rel));
     scored = tmp.slice(0, 50);
   }
-  mdpPaletteMatches = scored;
-  if (mdpPaletteIdx >= scored.length) mdpPaletteIdx = Math.max(0, scored.length - 1);
+  mdpFinderMatches = scored;
+  if (mdpFinderIdx >= scored.length) mdpFinderIdx = Math.max(0, scored.length - 1);
   list.innerHTML = '';
   scored.forEach((m, i) => {
     const li = document.createElement('li');
     li.setAttribute('role', 'option');
-    if (i === mdpPaletteIdx) li.setAttribute('aria-selected', 'true');
+    if (i === mdpFinderIdx) li.setAttribute('aria-selected', 'true');
     if (m.hits && m.hits.length) {
       const set = new Set(m.hits);
       for (let j = 0; j < m.rel.length; j++) {
@@ -297,71 +346,71 @@ function mdpPaletteRender(query) {
     }
     li.addEventListener('mousedown', (ev) => {
       ev.preventDefault();
-      mdpPaletteIdx = i;
-      mdpPaletteSubmit();
+      mdpFinderIdx = i;
+      mdpFinderSubmit();
     });
     list.appendChild(li);
   });
 }
 
-function mdpPaletteSubmit() {
-  const pick = mdpPaletteMatches[mdpPaletteIdx];
+function mdpFinderSubmit() {
+  const pick = mdpFinderMatches[mdpFinderIdx];
   if (!pick) return;
-  mdpPaletteClose();
+  mdpFinderClose();
   mdpTreeNavigate(pick.rel);
 }
 
-async function mdpPaletteOpen() {
-  const panel = document.getElementById('mdp-palette');
-  const input = document.getElementById('mdp-palette-input');
+async function mdpFinderOpen() {
+  const panel = document.getElementById('mdp-finder');
+  const input = document.getElementById('mdp-finder-input');
   if (!panel || !input) return;
   const data = await mdpEnsureTreeData();
   if (!data) return;
-  mdpPaletteIdx = 0;
+  mdpFinderIdx = 0;
   input.value = '';
   panel.hidden = false;
-  mdpPaletteIsOpen = true;
-  mdpPaletteRender('');
+  mdpFinderIsOpen = true;
+  mdpFinderRender('');
   input.focus();
 }
 
-function mdpPaletteClose() {
-  const panel = document.getElementById('mdp-palette');
+function mdpFinderClose() {
+  const panel = document.getElementById('mdp-finder');
   if (!panel) return;
   panel.hidden = true;
-  mdpPaletteIsOpen = false;
+  mdpFinderIsOpen = false;
 }
-window.mdpPaletteOpen = mdpPaletteOpen;
+window.mdpFinderOpen = mdpFinderOpen;
 
 document.addEventListener('keydown', (e) => {
   if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
   if (e.key !== 'p' && e.key !== 'P') return;
-  if (e.target && e.target.id === 'mdp-palette-input') return;
+  if (e.target && e.target.id === 'mdp-finder-input') return;
   // swallow browser print
   e.preventDefault();
-  if (mdpPaletteIsOpen) { mdpPaletteClose(); return; }
-  mdpPaletteOpen();
+  if (mdpFinderIsOpen) { mdpFinderClose(); return; }
+  mdpFinderOpen();
 });
 
 (function () {
-  const input = document.getElementById('mdp-palette-input');
+  const input = document.getElementById('mdp-finder-input');
   if (!input) return;
   input.addEventListener('input', () => {
-    mdpPaletteIdx = 0;
-    mdpPaletteRender(input.value);
+    mdpFinderIdx = 0;
+    mdpFinderRender(input.value);
   });
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') { e.preventDefault(); mdpPaletteClose(); return; }
-    if (e.key === 'Enter') { e.preventDefault(); mdpPaletteSubmit(); return; }
+    if (e.key === 'Escape') { e.preventDefault(); mdpFinderClose(); return; }
+    if (e.key === 'Enter') { e.preventDefault(); mdpFinderSubmit(); return; }
     const isDown = e.key === 'ArrowDown' || (e.ctrlKey && (e.key === 'n' || e.key === 'N'));
     const isUp = e.key === 'ArrowUp' || (e.ctrlKey && (e.key === 'p' || e.key === 'P'));
     if (isDown || isUp) {
       e.preventDefault();
-      const n = mdpPaletteMatches.length;
+      const n = mdpFinderMatches.length;
       if (!n) return;
-      mdpPaletteIdx = (mdpPaletteIdx + (isDown ? 1 : -1) + n) % n;
-      mdpPaletteRender(input.value);
-      const sel = document.querySelector('#mdp-palette-list li[aria-selected="true"]');
+      mdpFinderIdx = (mdpFinderIdx + (isDown ? 1 : -1) + n) % n;
+      mdpFinderRender(input.value);
+      const sel = document.querySelector('#mdp-finder-list li[aria-selected="true"]');
       if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: 'nearest' });
     }
   });
@@ -542,6 +591,7 @@ __EXTRA_CSS__
 <button id="mdp-fwd" class="mdp-nav-btn" aria-label="Forward" title="Forward" hidden>&#8250;</button>
 </div>
 __TREE_DOM__
+__FINDER_DOM__
 <div id="content" class="markdown-body">
 __BODY__
 </div>
@@ -692,20 +742,24 @@ mdpRenderMath();
 __MERMAID_SCRIPT__
 __MERMAID_INIT__
 __VIM_KEYS__
+__SHARED_NAV_SCRIPT__
 __TREE_SCRIPT__
+__FINDER_SCRIPT__
 __WS_SCRIPT__
 </script>
 </body>
 </html>`
 
-// currentFile is the absolute path the click handler resolves
-// relative hrefs against; empty when no file context applies (ad-hoc
-// RenderBytes callers). wsPort > 0 embeds the WS client. fileTree gates
-// the Tab-toggle file sidebar; when false the DOM and script are
-// omitted entirely. staticTreeJSON is the JSON literal embedded as
-// window.mdpStaticTree in static mode (only used when fileTree is on);
-// empty in WS mode (the page fetches /tree on first Tab open).
-func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, currentFile string, fileTree bool, staticTreeJSON string) string {
+// currentFile is the absolute path the click handler resolves relative
+// hrefs against; empty when no file context applies (ad-hoc RenderBytes
+// callers). wsPort > 0 embeds the WS client. fileTree gates the
+// Tab-toggle sidebar; fuzzyFinder gates the Ctrl+P fuzzy picker. Either
+// flag enables the shared data plumbing (mdpEnsureTreeData /
+// mdpTreeNavigate) so the live UI has something to call. staticTreeJSON
+// is the JSON literal embedded as window.mdpStaticTree in static mode
+// (only meaningful when at least one of fileTree/fuzzyFinder is on);
+// empty in WS mode (the page fetches /tree on demand).
+func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, currentFile string, fileTree, fuzzyFinder bool, staticTreeJSON string) string {
 	cssVars := CSSDark
 	hljsThemeCSS := hljsThemeDarkCSS
 	if theme == "light" {
@@ -741,21 +795,26 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, cu
 		hljsHighlightCall = "hljs.highlightAll();"
 	}
 
-	treeDOM := ""
-	treeScript := ""
+	treeDOM, treeScript, finderDOM, finderScript, sharedNavScript := "", "", "", "", ""
 	if fileTree {
 		treeDOM = `<div id="mdp-tree" hidden>` +
 			`<div class="mdp-tree-header"><span>Files</span>` +
 			`<button class="mdp-tree-close" aria-label="Close" title="Close">&times;</button>` +
-			`</div><div class="mdp-tree-body"></div></div>` +
-			`<div id="mdp-palette" hidden>` +
-			`<input id="mdp-palette-input" type="text" autocomplete="off" spellcheck="false" placeholder="Find file" aria-label="Find file">` +
-			`<ul id="mdp-palette-list" role="listbox"></ul></div>`
+			`</div><div class="mdp-tree-body"></div></div>`
+		treeScript = treeScriptTemplate
+	}
+	if fuzzyFinder {
+		finderDOM = `<div id="mdp-finder" hidden>` +
+			`<input id="mdp-finder-input" type="text" autocomplete="off" spellcheck="false" placeholder="Find file" aria-label="Find file">` +
+			`<ul id="mdp-finder-list" role="listbox"></ul></div>`
+		finderScript = finderScriptTemplate
+	}
+	if fileTree || fuzzyFinder {
 		treeData := ""
 		if staticTreeJSON != "" {
 			treeData = "window.mdpStaticTree = " + staticTreeJSON + ";"
 		}
-		treeScript = strings.ReplaceAll(treeScriptTemplate, "__STATIC_TREE_DATA__", treeData)
+		sharedNavScript = strings.ReplaceAll(sharedNavScriptTemplate, "__STATIC_TREE_DATA__", treeData)
 	}
 
 	return strings.NewReplacer(
@@ -777,7 +836,10 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, cu
 		"__MERMAID_INIT__", mermaidInit,
 		"__VIM_KEYS__", vimKeys(colemak, wsPort == 0),
 		"__TREE_DOM__", treeDOM,
+		"__FINDER_DOM__", finderDOM,
+		"__SHARED_NAV_SCRIPT__", sharedNavScript,
 		"__TREE_SCRIPT__", treeScript,
+		"__FINDER_SCRIPT__", finderScript,
 		"__WS_SCRIPT__", wsScript,
 	).Replace(pageTemplate)
 }

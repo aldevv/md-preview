@@ -163,8 +163,8 @@ body:has(#mdp-nav-bar:not([hidden])) {
   color: var(--color-text-secondary);
 }
 
-/* Ctrl+P fuzzy file palette. */
-#mdp-palette {
+/* Ctrl+P fuzzy file finder. */
+#mdp-finder {
   position: fixed;
   top: 12vh;
   left: 50%;
@@ -182,11 +182,11 @@ body:has(#mdp-nav-bar:not([hidden])) {
   font-size: 13px;
   overflow: hidden;
 }
-#mdp-palette[hidden] {
+#mdp-finder[hidden] {
   display: none;
 }
 
-#mdp-palette-input {
+#mdp-finder-input {
   width: 100%;
   box-sizing: border-box;
   padding: 12px 16px;
@@ -199,14 +199,14 @@ body:has(#mdp-nav-bar:not([hidden])) {
   outline: none;
 }
 
-#mdp-palette-list {
+#mdp-finder-list {
   list-style: none;
   margin: 0;
   padding: 4px 0;
   overflow-y: auto;
   flex: 1;
 }
-#mdp-palette-list li {
+#mdp-finder-list li {
   padding: 4px 16px;
   color: var(--color-text-primary);
   cursor: pointer;
@@ -214,11 +214,11 @@ body:has(#mdp-nav-bar:not([hidden])) {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-#mdp-palette-list li[aria-selected="true"],
-#mdp-palette-list li:hover {
+#mdp-finder-list li[aria-selected="true"],
+#mdp-finder-list li:hover {
   background: var(--color-bg-inline-code);
 }
-#mdp-palette-list mark {
+#mdp-finder-list mark {
   background: transparent;
   color: var(--color-link);
   font-weight: 600;

@@ -26,7 +26,8 @@ type Config struct {
 	Browser   any      `toml:"browser"`
 	Edit      bool     `toml:"edit"`
 	Colemak   bool     `toml:"colemak"`
-	FileTree  bool     `toml:"file_tree"`
+	FileTree    bool `toml:"file_tree"`
+	FuzzyFinder bool `toml:"fuzzy_finder"`
 }
 
 // Path returns the resolved config file path, honoring XDG_CONFIG_HOME and
@@ -54,7 +55,8 @@ const defaultConfigTemplate = `# md-preview config: uncomment any line to overri
 # browser    = "auto"           # "auto" | "firefox --new-window" | ["cmd", "arg"]
 # edit       = false            # default for -e (also open nvim)
 # colemak    = false            # swap in-page nav keys j/k/l → n/e/i
-# file_tree  = true             # Tab toggles a sidebar listing previewable files
+# file_tree    = true           # Tab toggles a sidebar listing previewable files
+# fuzzy_finder = true           # Ctrl+P opens a fuzzy file finder
 `
 
 // EnsureDefault writes a commented default config file to Path() when one
@@ -95,7 +97,7 @@ func Load() (Config, error) {
 // decode merges user overrides over this struct, so an absent key keeps
 // the default and an explicit `false` (or other zero value) wins.
 func defaults() Config {
-	return Config{FileTree: true}
+	return Config{FileTree: true, FuzzyFinder: true}
 }
 
 // ExpandTilde replaces a leading "~/" with the user's home directory. Bare

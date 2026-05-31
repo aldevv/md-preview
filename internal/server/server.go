@@ -45,6 +45,7 @@ type state struct {
 	port            int
 	colemak         bool
 	fileTree        bool
+	fuzzyFinder     bool
 	extraCSS        string
 	eventLog        io.Writer
 	wsClients       map[net.Conn]struct{}
@@ -257,6 +258,7 @@ func (s *state) handleIndex(w http.ResponseWriter, r *http.Request) {
 	port := s.port
 	colemak := s.colemak
 	fileTree := s.fileTree
+	fuzzyFinder := s.fuzzyFinder
 	file := s.file
 	fileDir := s.fileDir
 	extraCSS := s.extraCSS
@@ -269,7 +271,7 @@ func (s *state) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return imgURLFor(abs, fileDir)
 	})
 
-	page := render.BuildPage(body, theme, port, extraCSS, colemak, file, fileTree, "")
+	page := render.BuildPage(body, theme, port, extraCSS, colemak, file, fileTree, fuzzyFinder, "")
 	encoded := []byte(page)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(len(encoded)))
@@ -599,7 +601,8 @@ type Options struct {
 	Port     int
 	Theme    string
 	Colemak  bool
-	FileTree bool
+	FileTree    bool
+	FuzzyFinder bool
 	Watch    bool
 	ExtraCSS string
 	EventLog io.Writer
@@ -676,6 +679,7 @@ func serve(ctx context.Context, s *state, stdin io.Reader, quit func(), watch bo
 func Run(opts Options) error {
 	s := newState(opts.File, opts.Port, opts.Theme, opts.Colemak)
 	s.fileTree = opts.FileTree
+	s.fuzzyFinder = opts.FuzzyFinder
 	s.extraCSS = opts.ExtraCSS
 	s.eventLog = opts.EventLog
 	return serve(context.Background(), s, os.Stdin, func() { os.Exit(0) }, opts.Watch, opts.OnListen)

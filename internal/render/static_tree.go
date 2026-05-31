@@ -33,7 +33,8 @@ type StaticTreeOptions struct {
 	Theme    string
 	ExtraCSS string
 	Colemak  bool
-	FileTree bool
+	FileTree    bool
+	FuzzyFinder bool
 	// MaxFiles overrides StaticTreeMaxFiles when nonzero.
 	MaxFiles int
 	// PandocBudget overrides StaticTreePandocBudget when nonzero.
@@ -93,12 +94,12 @@ func RenderStaticTree(entry, tmpDir string, opts StaticTreeOptions) (string, err
 	if pandoc.InputFormat(resolvedEntry) != "" {
 		pandocCount++
 	}
-	// FileTree wants every previewable sibling clickable from the
-	// sidebar, not just files reachable via <a href> from the entry. Seed
-	// the queue with the whole walkable set so each one becomes a real
-	// pre-rendered tmp HTML target; the BFS still discovers nothing new
-	// from there, it just renders them. Budgets/caps still apply.
-	if opts.FileTree {
+	// FileTree and FuzzyFinder both want every previewable sibling clickable,
+	// not just files reachable via <a href> from the entry. Seed the queue
+	// with the whole walkable set so each one becomes a real pre-rendered
+	// tmp HTML target; the BFS still discovers nothing new from there, it
+	// just renders them. Budgets/caps still apply.
+	if opts.FileTree || opts.FuzzyFinder {
 		siblings, _ := WalkableFiles(rootDir, 0)
 		for _, rel := range siblings {
 			abs := filepath.Join(rootDir, filepath.FromSlash(rel))
@@ -151,7 +152,7 @@ func RenderStaticTree(entry, tmpDir string, opts StaticTreeOptions) (string, err
 	}
 
 	treeJSON := ""
-	if opts.FileTree {
+	if opts.FileTree || opts.FuzzyFinder {
 		treeJSON = buildStaticTreeJSON(rootDir, rendered)
 	}
 
@@ -164,7 +165,7 @@ func RenderStaticTree(entry, tmpDir string, opts StaticTreeOptions) (string, err
 			}
 			return FileURL(resolved), true
 		})
-		page := BuildPage(rewritten, opts.Theme, 0, opts.ExtraCSS, opts.Colemak, src, opts.FileTree, treeJSON)
+		page := BuildPage(rewritten, opts.Theme, 0, opts.ExtraCSS, opts.Colemak, src, opts.FileTree, opts.FuzzyFinder, treeJSON)
 		if err := writeStaticTmpFile(rendered[src], []byte(page)); err != nil {
 			return "", err
 		}
