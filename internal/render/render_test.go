@@ -588,6 +588,11 @@ func TestBuildPage_FileTreeEnabled(t *testing.T) {
 		"mdpToggleTree",
 		"mdpEnsureTreeData",
 		"e.key === 'Tab'",
+		"e.key === 'Enter'",
+		"e.key === 'ArrowDown' || e.key === 'j'",
+		"e.key === 'ArrowUp' || e.key === 'k'",
+		"e.key === 'ArrowRight' || e.key === 'l'",
+		"e.key === 'ArrowLeft' || e.key === 'h'",
 	}
 	for _, w := range wants {
 		if !strings.Contains(page, w) {
@@ -599,6 +604,26 @@ func TestBuildPage_FileTreeEnabled(t *testing.T) {
 	}
 	if strings.Contains(page, `id="mdp-finder"`) {
 		t.Errorf("file-tree-only page should not include the finder DOM")
+	}
+}
+
+func TestBuildPage_FileTreeColemakKeys(t *testing.T) {
+	page := BuildPage("<p>x</p>", "dark", 0, "", true, "", true, false, "")
+	wants := []string{
+		"e.key === 'ArrowDown' || e.key === 'n'",
+		"e.key === 'ArrowUp' || e.key === 'e'",
+		"e.key === 'ArrowRight' || e.key === 'i'",
+		"e.key === 'ArrowLeft' || e.key === 'h'",
+	}
+	for _, w := range wants {
+		if !strings.Contains(page, w) {
+			t.Errorf("colemak tree page missing %q", w)
+		}
+	}
+	for _, bad := range []string{"__TREE_DOWN__", "__TREE_UP__", "__TREE_RIGHT__", "e.key === 'ArrowDown' || e.key === 'j'", "e.key === 'ArrowUp' || e.key === 'k'", "e.key === 'ArrowRight' || e.key === 'l'"} {
+		if strings.Contains(page, bad) {
+			t.Errorf("colemak tree page should not contain %q", bad)
+		}
 	}
 }
 

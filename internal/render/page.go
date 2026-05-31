@@ -54,6 +54,7 @@ const vimKeysScriptTemplate = `
     document.addEventListener('keydown', (e) => {
         if (e.ctrlKey || e.metaKey || e.altKey) return;
         if (isEditable(e.target)) return;
+        if (window.mdpTreeIsOpen || window.mdpFinderIsOpen) return;
         const h = window.innerHeight;
         switch (e.key) {
             case '__DOWN__':  window.scrollBy({ top:  STEP, behavior: 'auto' }); break;
@@ -174,7 +175,9 @@ function mdpTreeNavigate(rel) {
 // emitted together.
 const treeScriptTemplate = `
 let mdpTreeIsOpen = false;
+window.mdpTreeIsOpen = false;
 let mdpTreeExpanded = JSON.parse(sessionStorage.getItem('mdpTreeExpanded') || '[]');
+let mdpTreeActive = { kind: '', path: '' };
 
 function mdpBuildTree(data) {
   const currentRel = mdpCurrentRel(data);
@@ -216,19 +219,17 @@ function mdpBuildNode(node, prefix, currentRel) {
     // page). Plain divs avoid chrome's focus traversal touching them.
     const summary = document.createElement('div');
     summary.className = 'mdp-tree-summary';
+    summary.tabIndex = -1;
+    summary.dataset.mdpTreeKind = 'folder';
+    summary.dataset.mdpTreePath = folderPath;
     summary.textContent = name;
     const childUL = mdpBuildNode(node.folders[name], folderPath, currentRel);
     const initialOpen = mdpTreeExpanded.includes(folderPath);
     childUL.hidden = !initialOpen;
     if (initialOpen) summary.classList.add('open');
     summary.addEventListener('click', () => {
-      const nowOpen = childUL.hidden;
-      childUL.hidden = !nowOpen;
-      summary.classList.toggle('open', nowOpen);
-      const set = new Set(mdpTreeExpanded);
-      if (nowOpen) set.add(folderPath); else set.delete(folderPath);
-      mdpTreeExpanded = [...set];
-      sessionStorage.setItem('mdpTreeExpanded', JSON.stringify(mdpTreeExpanded));
+      mdpTreeSetActive(summary);
+      mdpTreeToggleFolder(summary);
     });
     li.appendChild(summary);
     li.appendChild(childUL);
@@ -241,14 +242,76 @@ function mdpBuildNode(node, prefix, currentRel) {
     const a = document.createElement('a');
     a.textContent = f.name;
     a.href = '#';
+    a.dataset.mdpTreeKind = 'file';
+    a.dataset.mdpTreePath = f.rel;
     a.addEventListener('click', (ev) => {
       ev.preventDefault();
+      mdpTreeSetActive(a);
       mdpTreeNavigate(f.rel);
     });
     li.appendChild(a);
     ul.appendChild(li);
   }
   return ul;
+}
+
+function mdpTreeVisibleItems() {
+  const panel = document.getElementById('mdp-tree');
+  if (!panel || panel.hidden) return [];
+  return Array.from(panel.querySelectorAll('.mdp-tree-summary, .mdp-tree-file > a'))
+    .filter((el) => el.offsetParent !== null);
+}
+
+function mdpTreeSetActive(el) {
+  if (!el) return;
+  document.querySelectorAll('#mdp-tree .active').forEach((n) => n.classList.remove('active'));
+  el.classList.add('active');
+  mdpTreeActive = { kind: el.dataset.mdpTreeKind || '', path: el.dataset.mdpTreePath || '' };
+  if (el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
+}
+
+function mdpTreeRestoreActive() {
+  const items = mdpTreeVisibleItems();
+  if (!items.length) return;
+  let pick = null;
+  if (mdpTreeActive.path) {
+    pick = items.find((el) => el.dataset.mdpTreeKind === mdpTreeActive.kind && el.dataset.mdpTreePath === mdpTreeActive.path);
+  }
+  if (!pick) pick = document.querySelector('#mdp-tree .mdp-tree-file.current > a');
+  if (!pick || pick.offsetParent === null) pick = items[0];
+  mdpTreeSetActive(pick);
+}
+
+function mdpTreeMove(delta) {
+  const items = mdpTreeVisibleItems();
+  if (!items.length) return;
+  const current = document.querySelector('#mdp-tree .active');
+  const idx = Math.max(0, items.indexOf(current));
+  mdpTreeSetActive(items[(idx + delta + items.length) % items.length]);
+}
+
+function mdpTreeToggleFolder(summary, wantOpen) {
+  const childUL = summary && summary.nextElementSibling;
+  if (!childUL) return false;
+  const nowOpen = wantOpen === undefined ? childUL.hidden : wantOpen;
+  childUL.hidden = !nowOpen;
+  summary.classList.toggle('open', nowOpen);
+  const folderPath = summary.dataset.mdpTreePath;
+  const set = new Set(mdpTreeExpanded);
+  if (nowOpen) set.add(folderPath); else set.delete(folderPath);
+  mdpTreeExpanded = [...set];
+  sessionStorage.setItem('mdpTreeExpanded', JSON.stringify(mdpTreeExpanded));
+  return true;
+}
+
+function mdpTreeOpenActive() {
+  const current = document.querySelector('#mdp-tree .active');
+  if (!current) return;
+  if (current.dataset.mdpTreeKind === 'file') {
+    mdpTreeNavigate(current.dataset.mdpTreePath);
+    return;
+  }
+  mdpTreeToggleFolder(current);
 }
 
 async function mdpToggleTree(force) {
@@ -270,9 +333,12 @@ async function mdpToggleTree(force) {
     }
     panel.hidden = false;
     mdpTreeIsOpen = true;
+    window.mdpTreeIsOpen = true;
+    mdpTreeRestoreActive();
   } else {
     panel.hidden = true;
     mdpTreeIsOpen = false;
+    window.mdpTreeIsOpen = false;
   }
 }
 window.mdpToggleTree = mdpToggleTree;
@@ -295,14 +361,52 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && mdpTreeIsOpen) {
     e.preventDefault();
     mdpToggleTree(false);
+    return;
+  }
+  if (!mdpTreeIsOpen) return;
+  const isDown = e.key === 'ArrowDown' || e.key === '__TREE_DOWN__';
+  const isUp = e.key === 'ArrowUp' || e.key === '__TREE_UP__';
+  const isLeft = e.key === 'ArrowLeft' || e.key === 'h';
+  const isRight = e.key === 'ArrowRight' || e.key === '__TREE_RIGHT__';
+  if (isDown || isUp) {
+    e.preventDefault();
+    mdpTreeMove(isDown ? 1 : -1);
+    return;
+  }
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    mdpTreeOpenActive();
+    return;
+  }
+  const current = document.querySelector('#mdp-tree .active');
+  if (isRight && current && current.dataset.mdpTreeKind === 'folder') {
+    e.preventDefault();
+    if (mdpTreeToggleFolder(current, true)) mdpTreeRestoreActive();
+    return;
+  }
+  if (isLeft && current && current.dataset.mdpTreeKind === 'folder') {
+    e.preventDefault();
+    if (mdpTreeToggleFolder(current, false)) mdpTreeRestoreActive();
   }
 });
 `
+
+func buildTreeScript(colemak bool) string {
+	down, up, right := "j", "k", "l"
+	if colemak {
+		down, up, right = "n", "e", "i"
+	}
+	s := strings.ReplaceAll(treeScriptTemplate, "__TREE_DOWN__", down)
+	s = strings.ReplaceAll(s, "__TREE_UP__", up)
+	s = strings.ReplaceAll(s, "__TREE_RIGHT__", right)
+	return s
+}
 
 // finderScriptTemplate powers the Ctrl+P fuzzy file finder. Depends on
 // sharedNavScriptTemplate (mdpEnsureTreeData, mdpTreeNavigate).
 const finderScriptTemplate = `
 let mdpFinderIsOpen = false;
+window.mdpFinderIsOpen = false;
 let mdpFinderIdx = 0;
 let mdpFinderMatches = [];
 
@@ -395,6 +499,7 @@ async function mdpFinderOpen() {
   input.value = '';
   panel.hidden = false;
   mdpFinderIsOpen = true;
+  window.mdpFinderIsOpen = true;
   mdpFinderRender('');
   input.focus();
 }
@@ -404,6 +509,7 @@ function mdpFinderClose() {
   if (!panel) return;
   panel.hidden = true;
   mdpFinderIsOpen = false;
+  window.mdpFinderIsOpen = false;
 }
 window.mdpFinderOpen = mdpFinderOpen;
 
@@ -888,7 +994,7 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, cu
 			`<div class="mdp-tree-header"><span>Files</span>` +
 			`<button class="mdp-tree-close" aria-label="Close" title="Close">&times;</button>` +
 			`</div><div class="mdp-tree-body"></div></div>`
-		treeScript = treeScriptTemplate
+		treeScript = buildTreeScript(colemak)
 	}
 	if fuzzyFinder {
 		finderDOM = `<div id="mdp-finder" hidden>` +

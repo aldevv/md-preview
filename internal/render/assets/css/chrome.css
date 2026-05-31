@@ -179,6 +179,10 @@ body:has(#mdp-nav-bar:not([hidden])) {
 .mdp-tree-folder > .mdp-tree-summary:hover {
   background: var(--color-bg-inline-code);
 }
+.mdp-tree-folder > .mdp-tree-summary.active {
+  background: var(--color-bg-inline-code);
+  color: var(--color-text-primary);
+}
 
 .mdp-tree-file > a {
   display: block;
@@ -187,6 +191,9 @@ body:has(#mdp-nav-bar:not([hidden])) {
   text-decoration: none;
 }
 .mdp-tree-file > a:hover {
+  background: var(--color-bg-inline-code);
+}
+.mdp-tree-file > a.active {
   background: var(--color-bg-inline-code);
 }
 .mdp-tree-file.current > a {

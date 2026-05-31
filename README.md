@@ -73,25 +73,28 @@ closes with it (chrome `--app=` mode) or shows a "server stopped" notice.
 
 ### Keys
 
-| Action            | Default   | Colemak   |
-| ----------------- | --------- | --------- |
-| Down / Up         | `j` / `k` | `n` / `e` |
-| Left / Right      | `h` / `l` | `h` / `i` |
-| Half-page down/up | `d` / `u` | `d` / `u` |
-| Full-page down/up | `f` / `b` | `f` / `b` |
-| Top / Bottom      | `g` / `G` | `g` / `G` |
-| History back      | `H`       | `H`       |
-| History forward   | `L`       | `I`       |
-| File tree sidebar | `Tab`     | `Tab`     |
-| Fuzzy file finder | `Ctrl+P`  | `Ctrl+P`  |
-| Reload (static)   | `r`       | `r`       |
-| Close             | `q`       | `q`       |
+| Action            | Key       |
+| ----------------- | --------- |
+| Down / Up         | `j` / `k` |
+| Left / Right      | `h` / `l` |
+| Half-page down/up | `d` / `u` |
+| Full-page down/up | `f` / `b` |
+| Top / Bottom      | `g` / `G` |
+| History back      | `H`       |
+| History forward   | `L`       |
+| File tree sidebar | `Tab`     |
+| File tree move    | `j`/`k` or arrows |
+| File tree open    | `Enter`   |
+| Fuzzy file finder | `Ctrl+P`  |
+| Reload (static)   | `r`       |
+| Close             | `q`       |
 
 `r` is only bound in the default static preview (`mdp <file>`); `watch`
 and the Neovim plugin drive their own content refresh. Pair it with a
 re-run of `mdp <file>` to pull the latest changes in.
 
-Enable Colemak with `colemak = true` in the [config](#config).
+Enable Colemak with `colemak = true` in the [config](#config) to remap
+`j`/`k`/`l` to `n`/`e`/`i`.
 
 ### LaTeX
 
