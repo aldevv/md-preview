@@ -2,6 +2,8 @@ package render
 
 import (
 	"fmt"
+	"html"
+	"path/filepath"
 	"strings"
 )
 
@@ -96,6 +98,7 @@ ws.onmessage = (e) => {
         // handler resolves relative hrefs against the new dir.
         if (msg.file) {
             window.mdpCurrentFile = msg.file;
+            document.title = mdpFormatTitle(msg.file);
         }
         fetch('/').then(r => r.text()).then(html => {
             const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -210,6 +213,7 @@ const pageTemplate = `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
 <style>
 __HLJS_THEME_CSS__
 __CSS_VARS__
@@ -232,6 +236,14 @@ __BODY__
 <div id="mdp-toast" hidden></div>
 <script>
 window.mdpCurrentFile = __CURRENT_FILE_JS__;
+function mdpFormatTitle(path) {
+  if (!path) return 'md-preview';
+  const parts = path.split('/').filter(Boolean);
+  const base = parts[parts.length - 1] || path;
+  const parent = parts.length >= 2 ? parts[parts.length - 2] : '';
+  return parent ? base + ' - ' + parent : base;
+}
+window.mdpFormatTitle = mdpFormatTitle;
 // mdpStack + mdpIdx track the user's nav path so back/forward
 // buttons reflect actual nav state (not browser history length,
 // which includes pre-mdp entries). sessionStorage persists across
@@ -392,6 +404,7 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, cu
 	// literal (handles backslashes, quotes, unicode escapes). Empty
 	// currentFile becomes "" and the click handler no-ops.
 	currentFileJS := fmt.Sprintf("%q", currentFile)
+	title := html.EscapeString(titleFor(currentFile))
 
 	katexCSSOut, katexJSOut, katexAutoRenderJSOut := "", "", ""
 	if hasMath(body) {
@@ -420,6 +433,7 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, cu
 		"__KATEX_CSS__", katexCSSOut,
 		"__EXTRA_CSS__", extraCSS,
 		"__BODY__", body,
+		"__TITLE__", title,
 		"__CURRENT_FILE_JS__", currentFileJS,
 		"__HLJS_SCRIPT__", hljsScriptOut,
 		"__HLJS_HIGHLIGHT_CALL__", hljsHighlightCall,
@@ -430,6 +444,21 @@ func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, cu
 		"__VIM_KEYS__", vimKeys(colemak, wsPort == 0),
 		"__WS_SCRIPT__", wsScript,
 	).Replace(pageTemplate)
+}
+
+// titleFor formats the preview window title as "basename - parent",
+// falling back to "md-preview" when no file context applies (ad-hoc
+// RenderBytes callers).
+func titleFor(currentFile string) string {
+	if currentFile == "" {
+		return "md-preview"
+	}
+	base := filepath.Base(currentFile)
+	parent := filepath.Base(filepath.Dir(currentFile))
+	if parent == "" || parent == "." || parent == "/" {
+		return base
+	}
+	return base + " - " + parent
 }
 
 func hasMermaid(body string) bool {
