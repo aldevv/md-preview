@@ -451,7 +451,7 @@ document.addEventListener('keydown', (e) => {
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
   if (e.target && e.target.isContentEditable) return;
   if (window.mdpSelectIsActive) return;
-  if (e.key === __TREE_TOGGLE__) {
+  if (e.key === __TREE_TOGGLE__ && !e.shiftKey) {
     e.preventDefault();
     mdpToggleTree();
     return;
@@ -659,7 +659,10 @@ const selectScriptTemplate = `
   const ASK_ENABLED = __ASK_ENABLED__;
   const KEYS = __SELECT_KEYS_JSON__;
   const SINGLE_LABELS = 'abcdefghijklmnopqrstuvwxyz';
-  const MAX_LABELED_HITS = SINGLE_LABELS.length * SINGLE_LABELS.length;
+  // 26^3 = 17576 — way more than ever fits visibly on screen, but
+  // a finite cap keeps a pathological match (e.g. searching ' ' on a
+  // huge doc) from painting tens of thousands of overlay divs.
+  const MAX_LABELED_HITS = Math.pow(SINGLE_LABELS.length, 3);
   const state = {
     mode: 'idle',
     anchor: null,
@@ -678,7 +681,8 @@ const selectScriptTemplate = `
     askStarEl: null,
     askLastPrompt: '',
     askAnchorRect: null,
-    askSelectionText: ''
+    askSelectionText: '',
+    askHistoryIdx: -1
   };
   window.mdpSelectState = state;
   window.mdpSelectIsActive = false;
@@ -686,13 +690,30 @@ const selectScriptTemplate = `
     state.mode = m;
     window.mdpSelectIsActive = m !== 'idle';
   }
+  // labelLengthFor returns the shortest label width that can address n
+  // hits using SINGLE_LABELS as the alphabet. n=1..26 → 1, 27..676 →
+  // 2, 677..17576 → 3, etc.
+  function labelLengthFor(n) {
+    if (n <= 0) return 1;
+    let k = 1;
+    let cap = SINGLE_LABELS.length;
+    while (cap < n) { k++; cap *= SINGLE_LABELS.length; }
+    return k;
+  }
   function generateLabels(n) {
-    if (n <= SINGLE_LABELS.length) return SINGLE_LABELS.slice(0, n).split('');
+    const k = labelLengthFor(n);
+    if (k === 1) return SINGLE_LABELS.slice(0, n).split('');
     const out = [];
-    for (const a of SINGLE_LABELS) {
-      for (const b of SINGLE_LABELS) {
-        out.push(a + b);
-        if (out.length === n) return out;
+    const idx = new Array(k).fill(0);
+    while (out.length < n) {
+      let s = '';
+      for (let i = 0; i < k; i++) s += SINGLE_LABELS[idx[i]];
+      out.push(s);
+      for (let i = k - 1; i >= 0; i--) {
+        idx[i]++;
+        if (idx[i] < SINGLE_LABELS.length) break;
+        idx[i] = 0;
+        if (i === 0) return out;
       }
     }
     return out;
@@ -966,11 +987,12 @@ const selectScriptTemplate = `
     clearOverlays('label');
     state.labels.clear();
     state.partialKey = '';
+    const needle = char.toLowerCase();
     const hits = [];
     for (const node of mdpSelectVisibleTextNodes()) {
       const text = node.nodeValue;
       for (let i = 0; i < text.length; i++) {
-        if (text[i] === char) hits.push({ node, offset: i });
+        if (text[i].toLowerCase() === needle) hits.push({ node, offset: i });
         if (hits.length > MAX_LABELED_HITS) {
           mdpSelectToast('too many, scroll closer');
           mdpSelectBail();
@@ -984,7 +1006,7 @@ const selectScriptTemplate = `
       return;
     }
     const labelSeq = generateLabels(hits.length);
-    state.labelLen = hits.length > SINGLE_LABELS.length ? 2 : 1;
+    state.labelLen = labelLengthFor(hits.length);
     setMode('labeled');
     hits.forEach((hit, i) => {
       const label = labelSeq[i];
@@ -1092,6 +1114,7 @@ const selectScriptTemplate = `
     for (const k of ['askInputEl', 'askPillEl', 'askEl']) {
       if (state[k]) { state[k].remove(); state[k] = null; }
     }
+    clearOverlays('frozen');
   }
   // ASK_STAR_SVG is the Gemini-style four-point sparkle used for both
   // the floating selection icon and the top-right whole-file icon.
@@ -1109,7 +1132,10 @@ const selectScriptTemplate = `
   }
   function mdpAskShowSelectionStar() {
     if (!ASK_ENABLED || state.mode !== 'visual') return;
-    if (!mdpAskServerReachable()) return;
+    // Show in static mode too when the sidecar is available — clicking
+    // it routes through mdpAskOpenInput → mdpAskPromoteViaSidecar with
+    // the current selection.
+    if (!mdpAskServerReachable() && !mdpAskSidecarURL()) return;
     if (state.askStarEl) { state.askStarEl.remove(); state.askStarEl = null; }
     if (state.askInputEl || state.askPillEl || state.askEl) return;
     const sel = window.getSelection();
@@ -1136,10 +1162,29 @@ const selectScriptTemplate = `
     const u = window.__MDP_SIDECAR_URL__;
     return (typeof u === 'string' && u) ? u : '';
   }
-  function mdpAskPromoteViaSidecar() {
+  // selection (optional) is the text the user had selected on the
+  // static page; the sidecar forwards it to the watch page via the
+  // 302 query string so the input can open pre-loaded with that
+  // selection. Selections longer than maxSelLen are truncated to keep
+  // the URL under common browser limits (~8 KB).
+  function mdpAskPromoteViaSidecar(selection) {
     const u = mdpAskSidecarURL();
     if (!u) { mdpSelectToast('promote unavailable'); return; }
-    window.location.href = u + '/promote';
+    const params = new URLSearchParams();
+    if (selection) {
+      const maxSelLen = 4000;
+      let s = selection;
+      if (s.length > maxSelLen) s = s.slice(0, maxSelLen);
+      params.set('sel', s);
+    }
+    // Pass scroll position as a fraction (0–1) so the watch page can
+    // restore roughly where the user was — pages render with the same
+    // markdown so the fraction maps closely enough.
+    const max = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+    const frac = Math.min(1, Math.max(0, window.scrollY / max));
+    if (frac > 0) params.set('scroll', frac.toFixed(4));
+    const target = u + '/promote' + (params.toString() ? '?' + params.toString() : '');
+    window.location.href = target;
   }
   function mdpAskInstallFab() {
     if (!ASK_ENABLED) return;
@@ -1170,18 +1215,88 @@ const selectScriptTemplate = `
   }
   function mdpAskOpenInput() {
     if (!ASK_ENABLED || state.mode !== 'visual') return;
-    if (!mdpAskServerReachable()) { mdpSelectToast('ask requires mdp watch or mdp serve'); return; }
     const snap = mdpAskSnapshotSelection();
     if (!snap) { mdpSelectToast('no selection to ask about'); return; }
+    if (!mdpAskServerReachable()) {
+      if (mdpAskSidecarURL()) { mdpAskPromoteViaSidecar(snap.text); return; }
+      mdpSelectToast('ask requires mdp watch or mdp serve');
+      return;
+    }
     state.askSelectionText = snap.text;
     state.askAnchorRect = snap.rect;
     mdpAskShowInputUI();
+  }
+  // mdpAskSelectTextInContent finds needle in #content and makes it
+  // the native selection, returning true on hit. Tries window.find()
+  // first (it walks across text nodes, handling selections that
+  // crossed <a> or <code> inlines on the static page); falls back to
+  // a single-text-node walk for browsers without window.find.
+  function mdpAskSelectTextInContent(needle) {
+    if (!needle) return false;
+    const text = String(needle).trim().slice(0, 500);
+    if (!text) return false;
+    const content = document.getElementById('content');
+    if (!content) return false;
+    if (typeof window.find === 'function') {
+      const sel = window.getSelection();
+      if (sel) sel.removeAllRanges();
+      try {
+        if (window.find(text, false, false, false, false, false, false)) {
+          const s = window.getSelection();
+          if (s && s.rangeCount > 0 && content.contains(s.getRangeAt(0).startContainer)) {
+            return true;
+          }
+        }
+      } catch (_) {}
+    }
+    const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, null);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const val = n.nodeValue || '';
+      const idx = val.indexOf(text);
+      if (idx < 0) continue;
+      try {
+        const range = document.createRange();
+        range.setStart(n, idx);
+        range.setEnd(n, idx + text.length);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        return true;
+      } catch (_) { return false; }
+    }
+    return false;
+  }
+  // mdpAskFreezeSelection paints the live native selection as static
+  // overlay rects so the highlight stays visible after focus shifts
+  // to the ask input (which would otherwise blow away the native
+  // selection range). When called with no live selection it leaves
+  // existing frozen overlays in place — that's the static→watch
+  // path, where the overlay is painted up-front and showInputUI's
+  // re-call shouldn't clear it.
+  function mdpAskFreezeSelection() {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+    clearOverlays('frozen');
+    const rects = sel.getRangeAt(0).getClientRects();
+    for (const r of rects) {
+      if (r.width <= 0 || r.height <= 0) continue;
+      const span = document.createElement('span');
+      span.className = 'mdp-select-frozen';
+      span.dataset.mdpSelectKind = 'frozen';
+      span.style.left = Math.round(r.left + window.scrollX) + 'px';
+      span.style.top = Math.round(r.top + window.scrollY) + 'px';
+      span.style.width = Math.round(r.width) + 'px';
+      span.style.height = Math.round(r.height) + 'px';
+      document.body.appendChild(span);
+      state.overlays.push(span);
+    }
   }
   function mdpAskShowInputUI() {
     if (state.askEl) { state.askEl.remove(); state.askEl = null; }
     if (state.askPillEl) { state.askPillEl.remove(); state.askPillEl = null; }
     if (state.askInputEl) { state.askInputEl.remove(); state.askInputEl = null; }
     mdpAskHideSelectionStar();
+    mdpAskFreezeSelection();
     const wrap = document.createElement('div');
     wrap.className = 'mdp-ask-input';
     const input = document.createElement('input');
@@ -1237,6 +1352,14 @@ const selectScriptTemplate = `
         return;
       }
       mdpAskRenderCard(data.html || '');
+      // Cache the fresh answer locally so the next Shift+Tab can use
+      // it without a round-trip. The server-side JSONL is still the
+      // source of truth across sessions.
+      if (Array.isArray(state.askHistoryCache)) {
+        state.askHistoryCache.push({ prompt, html: data.html || '', ts: Math.floor(Date.now()/1000) });
+        if (state.askHistoryCache.length > 50) state.askHistoryCache.shift();
+      }
+      state.askHistoryIdx = -1;
     } catch (err) {
       if (err && err.name === 'AbortError') return;
       if (state.askPillEl) { state.askPillEl.remove(); state.askPillEl = null; }
@@ -1244,6 +1367,46 @@ const selectScriptTemplate = `
     } finally {
       if (state.askAbort === abort) state.askAbort = null;
     }
+  }
+  // mdpAskHistoryLoad fetches the per-file history from the server
+  // on demand. Cached in state.askHistoryCache for the lifetime of
+  // the page (cleared on file switch by the WS reload handler).
+  async function mdpAskHistoryLoad() {
+    if (Array.isArray(state.askHistoryCache)) return state.askHistoryCache;
+    if (state.askHistoryFetching) return state.askHistoryFetching;
+    state.askHistoryFetching = (async () => {
+      try {
+        const r = await fetch('/ask/history');
+        const data = await r.json().catch(() => ({entries: []}));
+        // Server returns newest-first; flip so the array is
+        // oldest→newest, matching the local cache convention used by
+        // mdpAskSubmit (push appends the newest).
+        const arr = (data.entries || []).slice().reverse();
+        state.askHistoryCache = arr;
+        return arr;
+      } catch (_) {
+        state.askHistoryCache = [];
+        return [];
+      } finally {
+        state.askHistoryFetching = null;
+      }
+    })();
+    return state.askHistoryFetching;
+  }
+  // mdpAskHistoryStep walks the saved-answer list: dir=-1 goes older,
+  // dir=+1 goes newer. First call from no-card lands on the newest
+  // entry; further -1 calls walk back; +1 past the newest closes.
+  async function mdpAskHistoryStep(dir) {
+    if (!mdpAskServerReachable()) return;
+    const arr = await mdpAskHistoryLoad();
+    if (!arr.length) { mdpSelectToast('no ask history yet'); return; }
+    let idx = state.askHistoryIdx;
+    if (idx < 0 || idx >= arr.length) idx = arr.length;
+    idx += dir;
+    if (idx < 0 || idx >= arr.length) { mdpAskCloseAll(); state.askHistoryIdx = -1; return; }
+    state.askHistoryIdx = idx;
+    state.askAnchorRect = null;
+    mdpAskRenderCard(arr[idx].html);
   }
   function mdpAskRenderCard(html) {
     if (state.askEl) { state.askEl.remove(); state.askEl = null; }
@@ -1266,8 +1429,8 @@ const selectScriptTemplate = `
   function mdpAskPositionAnchored(el, rect, opts) {
     const w = opts.width, h = opts.height;
     if (!rect) {
-      el.style.left = Math.max(8, (window.innerWidth - w) / 2) + 'px';
-      el.style.top = Math.max(8, (window.innerHeight - h) / 2) + 'px';
+      el.style.left = (window.scrollX + Math.max(8, (window.innerWidth - w) / 2)) + 'px';
+      el.style.top = (window.scrollY + Math.max(8, (window.innerHeight - h) / 2)) + 'px';
       return;
     }
     let top = rect.top + window.scrollY - h - 6;
@@ -1285,8 +1448,8 @@ const selectScriptTemplate = `
     const cardRect = el.getBoundingClientRect();
     const w = cardRect.width, h = cardRect.height;
     if (!rect) {
-      el.style.left = Math.max(margin, (window.innerWidth - w) / 2) + 'px';
-      el.style.top = Math.max(margin, (window.innerHeight - h) / 2) + 'px';
+      el.style.left = (window.scrollX + Math.max(margin, (window.innerWidth - w) / 2)) + 'px';
+      el.style.top = (window.scrollY + Math.max(margin, (window.innerHeight - h) / 2)) + 'px';
       return;
     }
     // Try right of the selection, then left, then below.
@@ -1308,6 +1471,23 @@ const selectScriptTemplate = `
 
   function mdpSelectOnKeydown(e) {
     if (isEditable(e.target) || blockedByOverlay()) return;
+    // Shift+Tab walks the saved-answer history; plain Tab steps
+    // forward but only when a card is already showing (so it doesn't
+    // steal Tab from the file-tree toggle in the default case).
+    if (ASK_ENABLED && e.key === 'Tab' && mdpAskServerReachable()) {
+      if (e.shiftKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        mdpAskHistoryStep(-1);
+        return;
+      }
+      if (state.askEl) {
+        e.preventDefault();
+        e.stopPropagation();
+        mdpAskHistoryStep(+1);
+        return;
+      }
+    }
     if (state.mode === 'idle' || state.mode === 'visual') {
       if (HOP_ENABLED && isKey(e, 'select_pick')) {
         e.preventDefault();
@@ -1320,6 +1500,15 @@ const selectScriptTemplate = `
         return;
       }
       if (state.mode === 'idle') {
+        // Escape closes any open ask UI before falling through to
+        // the visual-mode Escape handler that bails the selection.
+        if (ASK_ENABLED && e.key === 'Escape' &&
+            (state.askEl || state.askPillEl || state.askInputEl || state.askAbort)) {
+          e.preventDefault();
+          mdpAskCloseAll();
+          state.askHistoryIdx = -1;
+          return;
+        }
         // Idle-mode 'c' (select_ask) mirrors the AI icon: in static
         // mode it promotes via the sidecar; on the watch server it
         // opens the whole-file ask input directly.
@@ -1425,8 +1614,21 @@ const selectScriptTemplate = `
     }
   }
   document.addEventListener('keydown', mdpSelectOnKeydown, true);
+  // Pre-warm the sidecar's watch server so the click-to-AI redirect
+  // doesn't pay the cold-start cost (~100–500 ms). Using <img> over
+  // fetch because file:// pages can't fetch http://localhost without
+  // CORS, but image requests work; we don't care that the response
+  // isn't actually an image, only that the side-effect (sidecar
+  // starting watch) happens.
+  function mdpAskPrewarmSidecar() {
+    if (mdpAskServerReachable()) return;
+    const u = mdpAskSidecarURL();
+    if (!u) return;
+    try { new Image().src = u + '/promote?warm=1'; } catch (_) {}
+  }
   if (ASK_ENABLED) {
     mdpAskInstallFab();
+    mdpAskPrewarmSidecar();
     // The sidecar's /promote redirect appends ?open=ask so the user's
     // single click on the static-mode AI icon both promotes AND opens
     // the input on arrival. Query param (not a URL fragment) because
@@ -1435,15 +1637,51 @@ const selectScriptTemplate = `
     try {
       const params = new URLSearchParams(window.location.search);
       if (mdpAskServerReachable() && params.get('open') === 'ask') {
+        const sel = params.get('sel') || '';
+        const scrollFrac = parseFloat(params.get('scroll') || '0') || 0;
         params.delete('open');
+        params.delete('sel');
+        params.delete('scroll');
         const q = params.toString();
         const url = window.location.pathname + (q ? '?' + q : '') + window.location.hash;
         try { history.replaceState(null, '', url); } catch (_) {}
-        // Defer until after load + a paint frame so the browser's
-        // default body-focus on page load doesn't immediately steal
-        // focus back from the input we just opened.
+        // Paint the highlight immediately so there's no perceptible
+        // gap between the static-page selection going away and the
+        // watch page showing it. Opening the input itself still waits
+        // for load so focus sticks.
+        let scrollTarget = null;
+        if (sel) {
+          state.askSelectionText = sel;
+          if (mdpAskSelectTextInContent(sel)) {
+            const r = window.getSelection().getRangeAt(0).getBoundingClientRect();
+            state.askAnchorRect = r;
+            mdpAskFreezeSelection();
+            const ns = window.getSelection();
+            if (ns) ns.removeAllRanges();
+            scrollTarget = Math.max(0, r.top + window.scrollY - window.innerHeight / 2);
+          } else {
+            state.askAnchorRect = null;
+          }
+        }
+        // Selection wins for scroll restoration. Fall back to the
+        // scroll fraction the static page reported so plain idle 'c'
+        // (no selection) still lands the user where they were.
+        const restoreScroll = () => {
+          if (scrollTarget != null) {
+            window.scrollTo({ top: scrollTarget });
+          } else if (scrollFrac > 0) {
+            const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+            window.scrollTo({ top: max * scrollFrac });
+          }
+        };
+        restoreScroll();
         const openAndFocus = () => {
-          mdpAskOpenWholeFile();
+          restoreScroll();
+          if (sel) {
+            mdpAskShowInputUI();
+          } else {
+            mdpAskOpenWholeFile();
+          }
           requestAnimationFrame(() => {
             const i = document.querySelector('.mdp-ask-input input');
             if (i && document.activeElement !== i) i.focus();
@@ -1510,6 +1748,12 @@ ws.onmessage = (e) => {
         if (msg.file) {
             window.mdpCurrentFile = msg.file;
             document.title = mdpFormatTitle(msg.file);
+            // Per-file history: drop the cache so the next Shift+Tab
+            // fetches answers for the file we just switched to.
+            if (window.mdpSelectState) {
+                window.mdpSelectState.askHistoryCache = null;
+                window.mdpSelectState.askHistoryIdx = -1;
+            }
         }
         fetch('/').then(r => r.text()).then(html => {
             const doc = new DOMParser().parseFromString(html, 'text/html');

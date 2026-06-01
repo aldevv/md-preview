@@ -264,6 +264,7 @@ func newHandler(s *state) http.Handler {
 	mux.HandleFunc("/_img/", guard(http.MethodGet, s.handleImg))
 	if s.ask {
 		mux.HandleFunc("/ask", guard(http.MethodPost, s.handleAsk))
+		mux.HandleFunc("/ask/history", guard(http.MethodGet, s.handleAskHistory))
 	}
 	return mux
 }
@@ -546,7 +547,31 @@ func (s *state) handleAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	html := render.RenderBytes(stdout)
+	s.mu.Lock()
+	curFile := s.file
+	s.mu.Unlock()
+	appendHistoryAsync(curFile, prompt, html)
 	writeJSON(w, map[string]any{"ok": true, "html": html})
+}
+
+// handleAskHistory returns the per-file ask history newest-first.
+// File is the server's current document (s.file), not a client-
+// supplied path, so a tab from a stale render can't read another
+// file's history. Loaded lazily from disk on each call so startup
+// isn't paying for it.
+func (s *state) handleAskHistory(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	file := s.file
+	s.mu.Unlock()
+	entries, err := readHistoryFor(file, 50)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "history read failed")
+		return
+	}
+	if entries == nil {
+		entries = []historyEntry{}
+	}
+	writeJSON(w, map[string]any{"entries": entries})
 }
 
 // realRunAsk is the production runAsk: spawn argv with the prompt on
@@ -748,13 +773,61 @@ type Options struct {
 	// pass a never-EOF reader so server lifetime isn't tied to the parent
 	// closing the config-passing pipe.
 	Stdin io.Reader
+	// ClientIdleTimeout, when > 0, exits the server (via quit) after the
+	// last WS client has been disconnected for this duration. Only kicks
+	// in once at least one client has connected; before then the server
+	// stays up waiting (sidecar's wall-clock idle handles "never opened"
+	// case). Used by the sidecar to clean up when the user closes the
+	// preview window.
+	ClientIdleTimeout time.Duration
 }
 
 // serve leaks the stdin scanner goroutine on ctx-cancel when stdin is
 // os.Stdin: bufio.Scanner can't be cancelled, and the scanner unblocks
 // only when the process exits. Production exits via os.Exit before this
 // matters; tests pass bounded readers that EOF naturally.
-func serve(ctx context.Context, s *state, stdin io.Reader, quit func(), watch bool, onListen func(int)) error {
+// monitorClientIdle calls quit when the server has had at least one
+// WS client connect and is now back to zero for the full timeout
+// window. Polling once at ~timeout/4 keeps the check cheap and the
+// detection latency bounded.
+func monitorClientIdle(ctx context.Context, s *state, timeout time.Duration, quit func()) {
+	interval := timeout / 4
+	if interval < time.Second {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	var firstSeen bool
+	var idleSince time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.mu.Lock()
+			n := len(s.wsClients)
+			s.mu.Unlock()
+			if n > 0 {
+				firstSeen = true
+				idleSince = time.Time{}
+				continue
+			}
+			if !firstSeen {
+				continue
+			}
+			if idleSince.IsZero() {
+				idleSince = time.Now()
+				continue
+			}
+			if time.Since(idleSince) >= timeout {
+				quit()
+				return
+			}
+		}
+	}
+}
+
+func serve(ctx context.Context, s *state, stdin io.Reader, quit func(), watch bool, onListen func(int), clientIdleTimeout time.Duration) error {
 	s.doRender()
 
 	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
@@ -785,6 +858,9 @@ func serve(ctx context.Context, s *state, stdin io.Reader, quit func(), watch bo
 	defer watchCancel()
 	if watch {
 		go watchFile(watchCtx, s)
+	}
+	if clientIdleTimeout > 0 {
+		go monitorClientIdle(watchCtx, s, clientIdleTimeout, quit)
 	}
 
 	stdinDone := make(chan struct{})
@@ -839,5 +915,5 @@ func Run(opts Options) error {
 	if stdin == nil {
 		stdin = os.Stdin
 	}
-	return serve(context.Background(), s, stdin, func() { os.Exit(0) }, opts.Watch, opts.OnListen)
+	return serve(context.Background(), s, stdin, func() { os.Exit(0) }, opts.Watch, opts.OnListen, opts.ClientIdleTimeout)
 }

@@ -237,6 +237,17 @@ body.mdp-select-mode #content ::selection {
   background: var(--color-select-selection);
 }
 
+/* Frozen highlight rects painted when the ask input takes focus so
+   the user's selection stays visually marked even though the native
+   text-selection has moved to the input. */
+.mdp-select-frozen {
+  position: absolute;
+  pointer-events: none;
+  z-index: 19998;
+  background: var(--color-select-selection);
+  border-radius: 2px;
+}
+
 .mdp-ask-input {
   position: absolute;
   z-index: 20001;

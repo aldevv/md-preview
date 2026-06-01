@@ -113,6 +113,16 @@ func Open(opts Options) error {
 	delegate := objc.ID(delegateClass).Send(objc.RegisterName("alloc")).Send(objc.RegisterName("init"))
 	delegate.Send(objc.RegisterName("retain"))
 	wnd.Send(objc.RegisterName("setDelegate:"), delegate)
+	// KVO on WKWebView.title — the delegate's observeValueForKeyPath:
+	// hook mirrors it to the NSWindow. NSKeyValueObservingOptionNew = 1.
+	titleKey := objc.ID(objc.GetClass("NSString")).Send(objc.RegisterName("stringWithUTF8String:"), "title")
+	view.Send(
+		objc.RegisterName("addObserver:forKeyPath:options:context:"),
+		delegate,
+		titleKey,
+		uintptr(1),
+		uintptr(0),
+	)
 
 	// center BEFORE makeKeyAndOrderFront: otherwise the window flashes
 	// at the origin-derived position before settling (Apple docs).
@@ -141,10 +151,37 @@ func registerWindowDelegate() (objc.Class, error) {
 					Cmd: objc.RegisterName("windowWillClose:"),
 					Fn:  onWindowWillClose,
 				},
+				{
+					// KVO callback wired below to the WKWebView's
+					// "title" key path so the NSWindow title follows
+					// document.title — same effect as the GTK
+					// notify::title hook on Linux.
+					Cmd: objc.RegisterName("observeValueForKeyPath:ofObject:change:context:"),
+					Fn:  onObserveTitle,
+				},
 			},
 		)
 	})
 	return delegateClass, delegateClassErr
+}
+
+// onObserveTitle fires whenever the WKWebView's title KVO key
+// changes. We only register for "title", so any callback here is a
+// title update; copy it onto the owning NSWindow so the chrome
+// reflects document.title.
+func onObserveTitle(_ objc.ID, _ objc.SEL, _ objc.ID, object objc.ID, _ objc.ID, _ uintptr) {
+	if object == 0 {
+		return
+	}
+	title := object.Send(objc.RegisterName("title"))
+	if title == 0 {
+		return
+	}
+	wnd := object.Send(objc.RegisterName("window"))
+	if wnd == 0 {
+		return
+	}
+	wnd.Send(objc.RegisterName("setTitle:"), title)
 }
 
 // [NSApp stop:] only takes effect at the end of the current

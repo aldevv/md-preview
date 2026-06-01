@@ -58,6 +58,7 @@ var (
 	gtkMainQuit                                 func()
 	webkitWebViewNew                            func() uintptr
 	webkitWebViewLoadURI                        func(view uintptr, uri string)
+	webkitWebViewGetTitle                       func(view uintptr) string
 	webkitWebViewGetSettings                    func(view uintptr) uintptr
 	webkitWebViewGetContext                     func(view uintptr) uintptr
 	webkitWebViewSetBackgroundColor             func(view uintptr, rgba uintptr)
@@ -113,6 +114,7 @@ func dlopenAll() error {
 	purego.RegisterLibFunc(&gtkMainQuit, libgtk, "gtk_main_quit")
 	purego.RegisterLibFunc(&webkitWebViewNew, libwebkit, "webkit_web_view_new")
 	purego.RegisterLibFunc(&webkitWebViewLoadURI, libwebkit, "webkit_web_view_load_uri")
+	purego.RegisterLibFunc(&webkitWebViewGetTitle, libwebkit, "webkit_web_view_get_title")
 	purego.RegisterLibFunc(&webkitWebViewGetSettings, libwebkit, "webkit_web_view_get_settings")
 	purego.RegisterLibFunc(&webkitWebViewGetContext, libwebkit, "webkit_web_view_get_context")
 	purego.RegisterLibFunc(&webkitWebViewSetBackgroundColor, libwebkit, "webkit_web_view_set_background_color")
@@ -234,10 +236,13 @@ func Open(opts Options) error {
 	_ = os.Setenv("JSC_SIGNAL_FOR_GC", "35")
 	// Skip the bubblewrap/seccomp sandbox setup on Web Process spawn.
 	// We render local file:// markdown previews; the sandbox is part
-	// of the ~100-150ms cost between load_uri and LOAD_STARTED. Set
-	// only if the user hasn't pinned it themselves.
-	if os.Getenv("WEBKIT_FORCE_SANDBOX") == "" {
-		_ = os.Setenv("WEBKIT_FORCE_SANDBOX", "0")
+	// of the ~100-150ms cost between load_uri and LOAD_STARTED.
+	// WEBKIT_FORCE_SANDBOX was the legacy switch; modern WebKitGTK
+	// (2.46+) ignores it (and prints a warning) and wants the
+	// explicitly-named WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS
+	// instead. Set only if the user hasn't pinned it themselves.
+	if os.Getenv("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS") == "" {
+		_ = os.Setenv("WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS", "1")
 	}
 
 	loadOnce.Do(func() { loadErr = dlopenAll() })
@@ -311,6 +316,16 @@ func Open(opts Options) error {
 		return 0
 	})
 	gSignalConnectData(view, "load-changed", loadCB, 0, 0, 0)
+	// Mirror the WebView's document title to the GTK window title so
+	// the window header reflects "parent/basename" instead of the
+	// "mdp" placeholder set at window creation.
+	titleCB := purego.NewCallback(func(_view, _pspec, _data uintptr) uintptr {
+		if t := webkitWebViewGetTitle(view); t != "" {
+			gtkWindowSetTitle(window, t)
+		}
+		return 0
+	})
+	gSignalConnectData(view, "notify::title", titleCB, 0, 0, 0)
 	// Safety net: if the load stalls or the signal never fires, show
 	// the window anyway after 1.5s rather than leaving the user with
 	// nothing.

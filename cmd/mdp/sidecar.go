@@ -2,14 +2,18 @@ package main
 
 import (
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -110,22 +114,23 @@ func runSidecar(args []string, stderr io.Writer) int {
 
 		listenCh := make(chan int, 1)
 		sopts := server.Options{
-			File:          opts.File,
-			Port:          0,
-			Theme:         opts.Theme,
-			Colemak:       opts.Colemak,
-			FileTree:      opts.FileTree,
-			FuzzyFinder:   opts.FuzzyFinder,
-			Hop:           opts.Hop,
-			Visual:        opts.Visual,
-			Ask:           opts.Ask,
-			AskCommand:    opts.AskCommand,
-			AskTimeoutSec: opts.AskTimeoutSec,
-			Keys:          opts.Keys,
-			ExtraCSS:      opts.ExtraCSS,
-			Watch:         true,
-			Stdin:         pr,
-			OnListen:      func(p int) { listenCh <- p },
+			File:              opts.File,
+			Port:              0,
+			Theme:             opts.Theme,
+			Colemak:           opts.Colemak,
+			FileTree:          opts.FileTree,
+			FuzzyFinder:       opts.FuzzyFinder,
+			Hop:               opts.Hop,
+			Visual:            opts.Visual,
+			Ask:               opts.Ask,
+			AskCommand:        opts.AskCommand,
+			AskTimeoutSec:     opts.AskTimeoutSec,
+			Keys:              opts.Keys,
+			ExtraCSS:          opts.ExtraCSS,
+			Watch:             true,
+			Stdin:             pr,
+			OnListen:          func(p int) { listenCh <- p },
+			ClientIdleTimeout: 5 * time.Second,
 		}
 		go func() { watchDoneCh <- server.Run(sopts) }()
 
@@ -146,6 +151,22 @@ func runSidecar(args []string, stderr io.Writer) int {
 	}
 
 	mux := http.NewServeMux()
+	// Version + quit lets a fresher startSidecar replace this one when
+	// the user upgrades mdp without manually killing the old sidecar
+	// holding the deterministic per-file port. The /version body is
+	// "<buildVersion>/<configHash>" so a config change (theme, keys,
+	// etc.) also triggers replacement, not just a binary upgrade.
+	idTag := buildVersion() + "/" + sidecarConfigHash(opts)
+	mux.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(idTag))
+	})
+	mux.HandleFunc("/quit", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			os.Exit(0)
+		}()
+	})
 	mux.HandleFunc("/promote", func(w http.ResponseWriter, r *http.Request) {
 		host := r.Host
 		if h, _, err := net.SplitHostPort(host); err == nil {
@@ -165,8 +186,17 @@ func runSidecar(args []string, stderr io.Writer) int {
 		// after the 302 — some Chromium/WebKit configurations strip
 		// the URL fragment on cross-origin redirects. The page reads
 		// ?open=ask to auto-open the input on first paint so the
-		// user only has to click the AI icon once.
-		http.Redirect(w, r, url+"?open=ask", http.StatusFound)
+		// user only has to click the AI icon once. sel carries the
+		// optional static-page selection so visual-mode 'c' can land
+		// on the watch page with the selection already loaded.
+		target := url + "?open=ask"
+		if sel := r.URL.Query().Get("sel"); sel != "" {
+			target += "&sel=" + neturl.QueryEscape(sel)
+		}
+		if scroll := r.URL.Query().Get("scroll"); scroll != "" {
+			target += "&scroll=" + neturl.QueryEscape(scroll)
+		}
+		http.Redirect(w, r, target, http.StatusFound)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
@@ -212,6 +242,46 @@ func runSidecar(args []string, stderr io.Writer) int {
 	}
 }
 
+// sidecarConfigHash digests the options that affect what the sidecar
+// renders (theme, keys, ask config, file path, …) so eviction can
+// detect a config change, not just a binary version bump. First 12
+// hex chars of sha256 — plenty to avoid accidental collision.
+func sidecarConfigHash(opts sidecarOptions) string {
+	b, err := json.Marshal(opts)
+	if err != nil {
+		return "err"
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:6])
+}
+
+// evictStaleSidecar asks a stale sidecar (different version or
+// different config) on baseURL to quit so the new one can bind.
+// Short timeouts keep this strictly non-blocking: any failure (no
+// sidecar, identical tag, slow shutdown) falls through and the new
+// sidecar will simply lose the bind race.
+func evictStaleSidecar(baseURL, wantTag string) {
+	client := &http.Client{Timeout: 200 * time.Millisecond}
+	resp, err := client.Get(baseURL + "/version")
+	if err != nil {
+		return
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if strings.TrimSpace(string(body)) == wantTag {
+		return
+	}
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/quit", nil)
+	if err != nil {
+		return
+	}
+	if r2, err := client.Do(req); err == nil {
+		_ = r2.Body.Close()
+	}
+	// Give the OS a beat to release the listener.
+	time.Sleep(150 * time.Millisecond)
+}
+
 // startSidecar fires the detached sidecar child and returns the URL
 // the page should navigate to on promote. The spawn is fire-and-
 // forget: we never block the parent on it, so a slow exec, a
@@ -244,6 +314,10 @@ func startSidecar(rc resolved, env Environment, stderr io.Writer) string {
 	if err != nil {
 		return ""
 	}
+	// Evict any stale sidecar holding this port whose version/config
+	// tag differs (e.g. previous theme, prior binary). Same-tag
+	// sidecars are left alone — they already serve the right thing.
+	evictStaleSidecar(url, buildVersion()+"/"+sidecarConfigHash(opts))
 	go func() {
 		exe, err := env.Executable()
 		if err != nil {

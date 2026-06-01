@@ -86,6 +86,8 @@ closes with it (chrome `--app=` mode) or shows a "server stopped" notice.
 | File tree move    | `j`/`k` or arrows |
 | File tree open    | `Enter`   |
 | Fuzzy file finder | `Ctrl+P`  |
+| Ask Claude        | `c`       |
+| Ask history (prev / next) | `Shift+Tab` / `Tab` |
 | Reload (static)   | `r`       |
 | Close             | `q`       |
 
