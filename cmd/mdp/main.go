@@ -186,6 +186,8 @@ Subcommands:
                                     md-preview.nvim Neovim plugin). Run
                                     directly in a TTY to also get a
                                     native window.
+  mdp pdf <file> [-o output.pdf]    Render the markdown file to PDF
+                                    using headless Chrome/Chromium.
 `
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer, env Environment) int {
@@ -199,6 +201,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, env Environme
 			return runServe(args[1:], stdin, stderr, env)
 		case "watch":
 			return runWatchSubcommand(args[1:], stdout, stderr, env)
+		case "pdf":
+			return runPDF(args[1:], stdout, stderr, env)
 		case "skill":
 			return runSkill(args[1:], stdout, stderr, env)
 		case "update":

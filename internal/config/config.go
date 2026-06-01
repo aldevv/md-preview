@@ -471,6 +471,26 @@ var autoWindowsAppPaths = []string{
 	`C:\Program Files (x86)\Vivaldi\Application\vivaldi.exe`,
 }
 
+// ChromiumPath returns the path to an installed Chromium-family browser
+// suitable for `--headless --print-to-pdf`, or "" if none is found.
+// Reuses the same families/bundles tables as autoBrowserCmd so PDF
+// export tracks the same Chromium probe that powers the `--app=` flow.
+func ChromiumPath(lookPath func(string) (string, error), goos string) string {
+	if goos == "darwin" {
+		for _, p := range autoMacAppBundles {
+			if _, err := lookPath(p); err == nil {
+				return p
+			}
+		}
+	}
+	for _, name := range autoBrowserFamilies[0].bins { // index 0 is chromium-family
+		if p, err := lookPath(name); err == nil && p != "" {
+			return p
+		}
+	}
+	return ""
+}
+
 // FzfPick pipes a list of markdown files (cwd, recursive) into fzf and
 // returns the user's pick. Cancellation returns "", nil.
 func FzfPick(ctx context.Context, cwd string) (string, error) {
