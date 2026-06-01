@@ -729,7 +729,7 @@ func TestBuildPage_Colemak(t *testing.T) {
 }
 
 func TestBuildPageWithKeys_CustomOverrides(t *testing.T) {
-	page := BuildPageWithKeys("<p>x</p>", "dark", 0, "", false, "", true, true, "", map[string]string{
+	page := BuildPageWithKeys("<p>x</p>", "dark", 0, "", false, "", true, true, "", false, false, map[string]string{
 		"down":        "s",
 		"tree_toggle": "t",
 		"tree_open":   "o",
@@ -748,5 +748,47 @@ func TestBuildPageWithKeys_CustomOverrides(t *testing.T) {
 	}
 	if strings.Contains(page, `"bogus":"x"`) {
 		t.Errorf("unknown key action should not be emitted")
+	}
+}
+
+func TestBuildPage_HopOnly(t *testing.T) {
+	page := BuildPageWithKeys("<p>x</p>", "dark", 0, "", false, "", false, false, "", true, false, nil)
+	for _, want := range []string{"mdpSelectStartPick", "HOP_ENABLED = true", `"select_pick":"s"`} {
+		if !strings.Contains(page, want) {
+			t.Errorf("hop-only page missing %q", want)
+		}
+	}
+	if strings.Contains(page, "HOP_ENABLED = false") || strings.Contains(page, "VISUAL_ENABLED = true") {
+		t.Errorf("hop-only page has wrong select gate")
+	}
+}
+
+func TestBuildPage_VisualOnly(t *testing.T) {
+	page := BuildPageWithKeys("<p>x</p>", "dark", 0, "", false, "", false, false, "", false, true, nil)
+	for _, want := range []string{"mdpSelectStartCenter", "VISUAL_ENABLED = true", `"select_visual":"v"`} {
+		if !strings.Contains(page, want) {
+			t.Errorf("visual-only page missing %q", want)
+		}
+	}
+	if strings.Contains(page, "HOP_ENABLED = true") {
+		t.Errorf("visual-only page should not enable hop")
+	}
+}
+
+func TestBuildPage_HopAndVisual(t *testing.T) {
+	page := BuildPageWithKeys("<p>x</p>", "dark", 0, "", false, "", false, false, "", true, true, nil)
+	for _, want := range []string{"mdpSelectStartPick", "mdpSelectStartCenter", "mdpSelectPaintLineNumbers", "HOP_ENABLED = true", "VISUAL_ENABLED = true"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("hop+visual page missing %q", want)
+		}
+	}
+}
+
+func TestBuildPage_SelectModeOmitted(t *testing.T) {
+	page := BuildPageWithKeys("<p>x</p>", "dark", 0, "", false, "", false, false, "", false, false, nil)
+	for _, bad := range []string{"mdpSelectStartPick", "mdpSelectStartCenter", "mdpSelectPaintLineNumbers", "__VISUAL_SELECT_SCRIPT__"} {
+		if strings.Contains(page, bad) {
+			t.Errorf("select-disabled page should not contain %q", bad)
+		}
 	}
 }

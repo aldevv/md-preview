@@ -35,6 +35,8 @@ type StaticTreeOptions struct {
 	Colemak     bool
 	FileTree    bool
 	FuzzyFinder bool
+	Hop         bool
+	Visual      bool
 	Keys        map[string]string
 	// MaxFiles overrides StaticTreeMaxFiles when nonzero.
 	MaxFiles int
@@ -166,7 +168,7 @@ func RenderStaticTree(entry, tmpDir string, opts StaticTreeOptions) (string, err
 			}
 			return FileURL(resolved), true
 		})
-		page := BuildPageWithKeys(rewritten, opts.Theme, 0, opts.ExtraCSS, opts.Colemak, src, opts.FileTree, opts.FuzzyFinder, treeJSON, opts.Keys)
+		page := BuildPageWithKeys(rewritten, opts.Theme, 0, opts.ExtraCSS, opts.Colemak, src, opts.FileTree, opts.FuzzyFinder, treeJSON, opts.Hop, opts.Visual, opts.Keys)
 		if err := writeStaticTmpFile(rendered[src], []byte(page)); err != nil {
 			return "", err
 		}

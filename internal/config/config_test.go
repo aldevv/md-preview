@@ -134,6 +134,12 @@ func TestLoad_FullConfig(t *testing.T) {
 			if !cfg.Edit {
 				t.Errorf("Edit = false, want true")
 			}
+			if !cfg.Hop {
+				t.Errorf("Hop = false, want true default")
+			}
+			if !cfg.Visual {
+				t.Errorf("Visual = false, want true default")
+			}
 			if got := cfg.Keys["down"]; got != "s" {
 				t.Errorf("Keys[down] = %q, want s", got)
 			}
@@ -192,6 +198,26 @@ func TestLoad_PartialConfig(t *testing.T) {
 	}
 	if cfg.Edit {
 		t.Errorf("Edit = true, want false")
+	}
+	if !cfg.Hop {
+		t.Errorf("Hop = false, want true default")
+	}
+	if !cfg.Visual {
+		t.Errorf("Visual = false, want true default")
+	}
+}
+
+func TestLoad_DisablesHopAndVisual(t *testing.T) {
+	writeConfig(t, "hop = false\nvisual = false\n")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() err = %v", err)
+	}
+	if cfg.Hop {
+		t.Errorf("Hop = true, want false")
+	}
+	if cfg.Visual {
+		t.Errorf("Visual = true, want false")
 	}
 }
 

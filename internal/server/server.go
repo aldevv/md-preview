@@ -46,6 +46,8 @@ type state struct {
 	colemak         bool
 	fileTree        bool
 	fuzzyFinder     bool
+	hop             bool
+	visual          bool
 	keys            map[string]string
 	extraCSS        string
 	eventLog        io.Writer
@@ -260,6 +262,8 @@ func (s *state) handleIndex(w http.ResponseWriter, r *http.Request) {
 	colemak := s.colemak
 	fileTree := s.fileTree
 	fuzzyFinder := s.fuzzyFinder
+	hop := s.hop
+	visual := s.visual
 	keys := s.keys
 	file := s.file
 	fileDir := s.fileDir
@@ -273,7 +277,7 @@ func (s *state) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return imgURLFor(abs, fileDir)
 	})
 
-	page := render.BuildPageWithKeys(body, theme, port, extraCSS, colemak, file, fileTree, fuzzyFinder, "", keys)
+	page := render.BuildPageWithKeys(body, theme, port, extraCSS, colemak, file, fileTree, fuzzyFinder, "", hop, visual, keys)
 	encoded := []byte(page)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(len(encoded)))
@@ -605,6 +609,8 @@ type Options struct {
 	Colemak     bool
 	FileTree    bool
 	FuzzyFinder bool
+	Hop         bool
+	Visual      bool
 	Keys        map[string]string
 	Watch       bool
 	ExtraCSS    string
@@ -683,6 +689,8 @@ func Run(opts Options) error {
 	s := newState(opts.File, opts.Port, opts.Theme, opts.Colemak)
 	s.fileTree = opts.FileTree
 	s.fuzzyFinder = opts.FuzzyFinder
+	s.hop = opts.Hop
+	s.visual = opts.Visual
 	s.keys = opts.Keys
 	s.extraCSS = opts.ExtraCSS
 	s.eventLog = opts.EventLog

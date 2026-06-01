@@ -583,6 +583,8 @@ func renderEntryAsStaticTree(rc resolved, env Environment, stderr io.Writer) (st
 		Colemak:     rc.cfg.Colemak,
 		FileTree:    rc.cfg.FileTree,
 		FuzzyFinder: rc.cfg.FuzzyFinder,
+		Hop:         rc.cfg.Hop,
+		Visual:      rc.cfg.Visual,
 		Keys:        rc.cfg.Keys,
 	}
 	entryHTML, err := render.RenderStaticTree(rc.src, env.TempDir(), opts)
@@ -607,7 +609,7 @@ func renderEntryAsSingleFile(rc resolved, env Environment, stderr io.Writer) (st
 		}
 		return render.FileURL(abs), true
 	})
-	page := render.BuildPageWithKeys(body, rc.theme, 0, config.ExtraCSS(rc.cfg, stderr), rc.cfg.Colemak, rc.src, false, false, "", rc.cfg.Keys)
+	page := render.BuildPageWithKeys(body, rc.theme, 0, config.ExtraCSS(rc.cfg, stderr), rc.cfg.Colemak, rc.src, false, false, "", rc.cfg.Hop, rc.cfg.Visual, rc.cfg.Keys)
 	tmpPath := tmpHTMLPath(env.TempDir(), rc.src)
 	if err := writeTmpFile(tmpPath, []byte(page)); err != nil {
 		fmt.Fprintf(stderr, "mdp: writing tmp: %v\n", err)
@@ -750,6 +752,8 @@ func runWatchSubcommand(args []string, stdout, stderr io.Writer, env Environment
 		Colemak:     rc.cfg.Colemak,
 		FileTree:    rc.cfg.FileTree,
 		FuzzyFinder: rc.cfg.FuzzyFinder,
+		Hop:         rc.cfg.Hop,
+		Visual:      rc.cfg.Visual,
 		Keys:        rc.cfg.Keys,
 		Watch:       true,
 		ExtraCSS:    config.ExtraCSS(rc.cfg, stderr),
@@ -860,6 +864,8 @@ func runServe(args []string, stdin io.Reader, stderr io.Writer, env Environment)
 		Colemak:     colemak,
 		FileTree:    cfg.FileTree,
 		FuzzyFinder: cfg.FuzzyFinder,
+		Hop:         cfg.Hop,
+		Visual:      cfg.Visual,
 		Keys:        cfg.Keys,
 		ExtraCSS:    config.ExtraCSS(cfg, stderr),
 	}

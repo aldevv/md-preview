@@ -12,4 +12,6 @@
   --color-alert-important: #8957e5;
   --color-alert-warning: #d29922;
   --color-alert-caution: #da3633;
+  --color-select-label-bg: #f2cc60;
+  --color-select-selection: rgba(242, 204, 96, 0.45);
 }

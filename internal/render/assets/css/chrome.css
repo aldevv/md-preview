@@ -206,6 +206,37 @@ body:has(#mdp-nav-bar:not([hidden])) {
   color: var(--color-text-secondary);
 }
 
+.mdp-select-label {
+  position: absolute;
+  z-index: 20000;
+  pointer-events: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  padding: 0 2px;
+  border-radius: 2px;
+  color: var(--color-bg-primary);
+  background: var(--color-select-label-bg);
+  box-shadow: 0 0 0 1px var(--color-bg-primary);
+}
+
+.mdp-select-linenum {
+  position: absolute;
+  left: 4px;
+  z-index: 19999;
+  pointer-events: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1;
+  opacity: 0.6;
+  color: var(--color-text-secondary);
+}
+
+body.mdp-select-mode #content ::selection {
+  background: var(--color-select-selection);
+}
+
 /* Ctrl+P fuzzy file finder. */
 #mdp-finder {
   position: fixed;

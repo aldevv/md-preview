@@ -61,6 +61,26 @@ func TestHandler_GetHTML_ReturnsPage(t *testing.T) {
 	}
 }
 
+func TestHandler_GetHTML_IncludesSelectScript(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	s := newTestState(t, file)
+	s.hop = true
+	s.visual = true
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "mdpSelectStartPick") {
+		t.Errorf("body missing select script")
+	}
+}
+
 func TestHandler_PostRender_BumpsVersion(t *testing.T) {
 	dir := t.TempDir()
 	file := writeMD(t, dir, "doc.md", "# Hello\n")
@@ -1066,10 +1086,10 @@ func (f *fakeConn) isClosed() bool {
 	return f.closed
 }
 
-func (f *fakeConn) LocalAddr() net.Addr                { return &net.TCPAddr{} }
-func (f *fakeConn) RemoteAddr() net.Addr               { return &net.TCPAddr{} }
-func (f *fakeConn) SetDeadline(t time.Time) error      { return f.SetWriteDeadline(t) }
-func (f *fakeConn) SetReadDeadline(_ time.Time) error  { return nil }
+func (f *fakeConn) LocalAddr() net.Addr               { return &net.TCPAddr{} }
+func (f *fakeConn) RemoteAddr() net.Addr              { return &net.TCPAddr{} }
+func (f *fakeConn) SetDeadline(t time.Time) error     { return f.SetWriteDeadline(t) }
+func (f *fakeConn) SetReadDeadline(_ time.Time) error { return nil }
 func (f *fakeConn) SetWriteDeadline(t time.Time) error {
 	f.mu.Lock()
 	f.deadline = t

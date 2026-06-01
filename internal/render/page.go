@@ -22,6 +22,17 @@ const vimKeysScriptTemplate = `
         const tag = el.tagName;
         return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
     }
+    const ZOOM_MIN = 0.3, ZOOM_MAX = 3.0, ZOOM_STEP = 0.1;
+    function mdpReadZoom() {
+        const v = parseFloat(sessionStorage.getItem('mdpZoom'));
+        return isFinite(v) && v > 0 ? v : 1;
+    }
+    function mdpApplyZoom(z) {
+        z = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
+        document.body.style.zoom = z;
+        sessionStorage.setItem('mdpZoom', String(z));
+    }
+    mdpApplyZoom(mdpReadZoom());
     // Hold-to-scroll: a single d/u/f/b press is a smooth half- or
     // full-page jump. Holding switches to a rAF-driven constant-
     // velocity scroll. Each call sets its own pxPerFrame so f/b hold
@@ -55,7 +66,7 @@ const vimKeysScriptTemplate = `
     document.addEventListener('keydown', (e) => {
         if (e.ctrlKey || e.metaKey || e.altKey) return;
         if (isEditable(e.target)) return;
-        if (window.mdpTreeIsOpen || window.mdpFinderIsOpen) return;
+        if (window.mdpTreeIsOpen || window.mdpFinderIsOpen || window.mdpSelectIsActive) return;
         const h = window.innerHeight;
         if (isKey(e, 'down')) {
             window.scrollBy({ top:  STEP, behavior: 'auto' });
@@ -85,6 +96,12 @@ const vimKeysScriptTemplate = `
             if (typeof mdpGoBack === 'function') mdpGoBack(); else return;
         } else if (isKey(e, 'history_forward')) {
             if (typeof mdpGoForward === 'function') mdpGoForward(); else return;
+        } else if (isKey(e, 'zoom_in')) {
+            mdpApplyZoom(mdpReadZoom() + ZOOM_STEP);
+        } else if (isKey(e, 'zoom_out')) {
+            mdpApplyZoom(mdpReadZoom() - ZOOM_STEP);
+        } else if (isKey(e, 'zoom_reset')) {
+            mdpApplyZoom(1);
         } else if (isKey(e, 'close')) {
             window.close();
         } else if (__RELOAD_CONDITION__) {
@@ -132,6 +149,23 @@ func defaultKeyBindings(colemak bool) KeyBindings {
 		"tree_right":      right,
 		"tree_open":       "Enter",
 		"finder_open":     "Ctrl+p",
+		"select_pick":     "s",
+		"select_visual":   "v",
+		"select_left":     "h",
+		"select_right":    right,
+		"select_down":     down,
+		"select_up":       up,
+		"select_word_next": "w",
+		"select_word_prev": "b",
+		"select_line_start": "0",
+		"select_line_end":  "$",
+		"select_top":       "g",
+		"select_bottom":    "G",
+		"select_yank":      "y",
+		"select_toggle_lines": "L",
+		"zoom_in":         "+",
+		"zoom_out":        "-",
+		"zoom_reset":      "0",
 	}
 }
 
@@ -415,6 +449,7 @@ document.addEventListener('keydown', (e) => {
   const tag = (e.target && e.target.tagName) || '';
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
   if (e.target && e.target.isContentEditable) return;
+  if (window.mdpSelectIsActive) return;
   if (e.key === __TREE_TOGGLE__) {
     e.preventDefault();
     mdpToggleTree();
@@ -581,6 +616,7 @@ window.mdpFinderOpen = mdpFinderOpen;
 document.addEventListener('keydown', (e) => {
   if (!mdpMatchesKeySpec(e, __FINDER_OPEN__)) return;
   if (e.target && e.target.id === 'mdp-finder-input') return;
+  if (window.mdpSelectIsActive) return;
   e.preventDefault();
   if (mdpFinderIsOpen) { mdpFinderClose(); return; }
   mdpFinderOpen();
@@ -613,6 +649,533 @@ document.addEventListener('keydown', (e) => {
 
 func buildFinderScript(keys KeyBindings) string {
 	return strings.ReplaceAll(finderScriptTemplate, "__FINDER_OPEN__", jsString(keys["finder_open"]))
+}
+
+const selectScriptTemplate = `
+(() => {
+  const HOP_ENABLED = __HOP_ENABLED__;
+  const VISUAL_ENABLED = __VISUAL_ENABLED__;
+  const KEYS = __SELECT_KEYS_JSON__;
+  const SINGLE_LABELS = 'abcdefghijklmnopqrstuvwxyz';
+  const MAX_LABELED_HITS = SINGLE_LABELS.length * SINGLE_LABELS.length;
+  const state = {
+    mode: 'idle',
+    anchor: null,
+    head: null,
+    labels: new Map(),
+    overlays: [],
+    lineRAF: null,
+    lineListening: false,
+    labelLen: 1,
+    partialKey: '',
+    countBuffer: ''
+  };
+  window.mdpSelectState = state;
+  window.mdpSelectIsActive = false;
+  function setMode(m) {
+    state.mode = m;
+    window.mdpSelectIsActive = m !== 'idle';
+  }
+  function generateLabels(n) {
+    if (n <= SINGLE_LABELS.length) return SINGLE_LABELS.slice(0, n).split('');
+    const out = [];
+    for (const a of SINGLE_LABELS) {
+      for (const b of SINGLE_LABELS) {
+        out.push(a + b);
+        if (out.length === n) return out;
+      }
+    }
+    return out;
+  }
+
+  function key(action) { return KEYS[action] || ''; }
+  function isKey(e, action) { return key(action) && e.key === key(action); }
+  function isEditable(el) {
+    if (!el) return false;
+    const tag = el.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+  }
+  function blockedByOverlay() {
+    return (typeof mdpFinderIsOpen !== 'undefined' && mdpFinderIsOpen) ||
+      (typeof mdpTreeIsOpen !== 'undefined' && mdpTreeIsOpen);
+  }
+  function contentEl() { return document.getElementById('content'); }
+  function insideContent(node) {
+    const content = contentEl();
+    if (!content || !node) return false;
+    const el = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+    return !!(el && content.contains(el));
+  }
+  function mdpSelectToast(msg) {
+    if (typeof mdpShowToast === 'function') mdpShowToast(msg);
+  }
+  function clearOverlays(kind) {
+    state.overlays = state.overlays.filter((el) => {
+      if (!kind || el.dataset.mdpSelectKind === kind) {
+        el.remove();
+        return false;
+      }
+      return true;
+    });
+  }
+  function mdpSelectStopLineNumbers() {
+    if (!state.lineListening) return;
+    window.removeEventListener('scroll', mdpSelectScheduleLineNumbers);
+    window.removeEventListener('resize', mdpSelectScheduleLineNumbers);
+    state.lineListening = false;
+    if (state.lineRAF) {
+      cancelAnimationFrame(state.lineRAF);
+      state.lineRAF = null;
+    }
+  }
+  function mdpSelectReset(keepSelection) {
+    clearOverlays();
+    mdpSelectStopLineNumbers();
+    document.body.classList.remove('mdp-select-mode');
+    if (!keepSelection) {
+      const sel = window.getSelection();
+      if (sel) sel.removeAllRanges();
+    }
+    setMode('idle');
+    state.anchor = null;
+    state.head = null;
+    state.labels.clear();
+    state.labelLen = 1;
+    state.partialKey = '';
+    state.countBuffer = '';
+  }
+  function mdpSelectBail() {
+    mdpSelectReset(false);
+  }
+  window.mdpSelectBail = mdpSelectBail;
+
+  function mdpSelectVisibleTextNodes() {
+    const root = contentEl();
+    if (!root) return [];
+    const nodes = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        if (!node.nodeValue) return NodeFilter.FILTER_REJECT;
+        const parent = node.parentElement;
+        if (!parent) return NodeFilter.FILTER_REJECT;
+        if (parent.closest('script,style')) return NodeFilter.FILTER_REJECT;
+        const rect = parent.getBoundingClientRect();
+        if (rect.bottom < -200 || rect.top > window.innerHeight + 200) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n);
+    return nodes;
+  }
+
+  function textPoint(node, offset) {
+    return { node, offset: Math.max(0, Math.min(offset, node.nodeValue.length)) };
+  }
+  function pointCompare(a, b) {
+    if (a.node === b.node) return a.offset - b.offset;
+    const pos = a.node.compareDocumentPosition(b.node);
+    if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+    if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+    return 0;
+  }
+  function mdpSelectMakeSelection(start, end) {
+    const range = document.createRange();
+    range.setStart(start.node, start.offset);
+    range.setEnd(end.node, end.offset);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+  function mdpSelectRebuildRange() {
+    if (!state.anchor || !state.head) return;
+    let start = state.anchor, end = state.head;
+    if (pointCompare(end, start) < 0) {
+      start = state.head;
+      end = state.anchor;
+    }
+    mdpSelectMakeSelection(start, end);
+  }
+
+  function mdpSelectNodeAfter(node, dir) {
+    const nodes = mdpSelectVisibleTextNodes();
+    const idx = nodes.indexOf(node);
+    if (idx < 0) return null;
+    return nodes[idx + dir] || null;
+  }
+  function mdpSelectMoveChar(delta) {
+    if (!state.head || state.mode !== 'visual') return;
+    let node = state.head.node;
+    let offset = state.head.offset + delta;
+    while (node && offset < 0) {
+      node = mdpSelectNodeAfter(node, -1);
+      if (node) offset = node.nodeValue.length + offset;
+    }
+    while (node && offset > node.nodeValue.length) {
+      offset -= node.nodeValue.length;
+      node = mdpSelectNodeAfter(node, 1);
+    }
+    if (!node) return;
+    state.head = textPoint(node, offset);
+    mdpSelectRebuildRange();
+  }
+
+  // j/k move head to the start/end of the next/previous visible text
+  // block. Not pixel-accurate visual-line motion, but close enough for
+  // a markdown preview where each <p>/<li>/<h*> is a unit.
+  function mdpSelectMoveLine(delta) {
+    if (!state.head || state.mode !== 'visual') return;
+    const nodes = mdpSelectVisibleTextNodes();
+    const idx = nodes.indexOf(state.head.node);
+    if (idx < 0) return;
+    const targetIdx = Math.max(0, Math.min(nodes.length - 1, idx + delta));
+    const next = nodes[targetIdx];
+    if (!next || next === state.head.node) return;
+    state.head = textPoint(next, delta > 0 ? next.nodeValue.length : 0);
+    mdpSelectRebuildRange();
+  }
+
+  function mdpSelectMoveToLineStart() {
+    if (!state.head || state.mode !== 'visual') return;
+    state.head = textPoint(state.head.node, 0);
+    mdpSelectRebuildRange();
+  }
+  function mdpSelectMoveToLineEnd() {
+    if (!state.head || state.mode !== 'visual') return;
+    state.head = textPoint(state.head.node, state.head.node.nodeValue.length);
+    mdpSelectRebuildRange();
+  }
+  function mdpSelectMoveToTop() {
+    if (state.mode !== 'visual') return;
+    const nodes = mdpSelectVisibleTextNodes();
+    if (!nodes.length) return;
+    state.head = textPoint(nodes[0], 0);
+    mdpSelectRebuildRange();
+  }
+  function mdpSelectMoveToBottom() {
+    if (state.mode !== 'visual') return;
+    const nodes = mdpSelectVisibleTextNodes();
+    if (!nodes.length) return;
+    const last = nodes[nodes.length - 1];
+    state.head = textPoint(last, last.nodeValue.length);
+    mdpSelectRebuildRange();
+  }
+  function mdpSelectMoveWord(delta) {
+    if (!state.head || state.mode !== 'visual') return;
+    const ws = /\s/;
+    let node = state.head.node;
+    let offset = state.head.offset;
+    if (delta > 0) {
+      while (node) {
+        const text = node.nodeValue;
+        while (offset < text.length && !ws.test(text[offset])) offset++;
+        while (offset < text.length && ws.test(text[offset])) offset++;
+        if (offset < text.length) {
+          state.head = textPoint(node, offset);
+          mdpSelectRebuildRange();
+          return;
+        }
+        node = mdpSelectNodeAfter(node, 1);
+        offset = 0;
+        if (node) {
+          const t = node.nodeValue;
+          while (offset < t.length && ws.test(t[offset])) offset++;
+          if (offset < t.length) {
+            state.head = textPoint(node, offset);
+            mdpSelectRebuildRange();
+            return;
+          }
+        }
+      }
+      return;
+    }
+    while (node) {
+      const text = node.nodeValue;
+      let i = offset - 1;
+      while (i >= 0 && ws.test(text[i])) i--;
+      while (i >= 0 && !ws.test(text[i])) i--;
+      const wordStart = i + 1;
+      if (wordStart < offset) {
+        state.head = textPoint(node, wordStart);
+        mdpSelectRebuildRange();
+        return;
+      }
+      node = mdpSelectNodeAfter(node, -1);
+      if (node) offset = node.nodeValue.length;
+    }
+  }
+
+  function mdpSelectPaintLineNumbers() {
+    clearOverlays('line');
+    const blocks = document.querySelectorAll('#content [data-line]');
+    for (const el of blocks) {
+      const rect = el.getBoundingClientRect();
+      if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
+      const span = document.createElement('span');
+      span.className = 'mdp-select-linenum';
+      span.dataset.mdpSelectKind = 'line';
+      span.style.top = Math.round(rect.top + window.scrollY) + 'px';
+      span.textContent = el.dataset.line;
+      document.body.appendChild(span);
+      state.overlays.push(span);
+    }
+  }
+  function mdpSelectScheduleLineNumbers() {
+    if (state.lineRAF) return;
+    state.lineRAF = requestAnimationFrame(() => {
+      state.lineRAF = null;
+      if (state.mode === 'visual') mdpSelectPaintLineNumbers();
+    });
+  }
+  function mdpSelectStartLineNumbers() {
+    mdpSelectPaintLineNumbers();
+    if (state.lineListening) return;
+    window.addEventListener('scroll', mdpSelectScheduleLineNumbers);
+    window.addEventListener('resize', mdpSelectScheduleLineNumbers);
+    state.lineListening = true;
+  }
+
+  function mdpSelectJumpTo(node, offset) {
+    clearOverlays('label');
+    const start = textPoint(node, offset);
+    if (VISUAL_ENABLED) {
+      setMode('visual');
+      state.anchor = start;
+      state.head = textPoint(node, offset + 1);
+      document.body.classList.add('mdp-select-mode');
+      mdpSelectRebuildRange();
+      return;
+    }
+    mdpSelectMakeSelection(start, textPoint(node, offset + 1));
+    mdpSelectReset(true);
+  }
+  window.mdpSelectJumpTo = mdpSelectJumpTo;
+
+  function mdpSelectPaintLabels(char) {
+    clearOverlays('label');
+    state.labels.clear();
+    state.partialKey = '';
+    const hits = [];
+    for (const node of mdpSelectVisibleTextNodes()) {
+      const text = node.nodeValue;
+      for (let i = 0; i < text.length; i++) {
+        if (text[i] === char) hits.push({ node, offset: i });
+        if (hits.length > MAX_LABELED_HITS) {
+          mdpSelectToast('too many, scroll closer');
+          mdpSelectBail();
+          return;
+        }
+      }
+    }
+    if (!hits.length) {
+      mdpSelectToast('no matches');
+      mdpSelectBail();
+      return;
+    }
+    const labelSeq = generateLabels(hits.length);
+    state.labelLen = hits.length > SINGLE_LABELS.length ? 2 : 1;
+    setMode('labeled');
+    hits.forEach((hit, i) => {
+      const label = labelSeq[i];
+      const range = document.createRange();
+      range.setStart(hit.node, hit.offset);
+      range.setEnd(hit.node, hit.offset + 1);
+      const rect = range.getBoundingClientRect();
+      if (!rect || rect.width === 0 && rect.height === 0) return;
+      const span = document.createElement('span');
+      span.className = 'mdp-select-label';
+      span.dataset.mdpSelectKind = 'label';
+      span.dataset.mdpSelectLabel = label;
+      span.style.left = Math.round(rect.left + window.scrollX) + 'px';
+      span.style.top = Math.round(rect.top + window.scrollY) + 'px';
+      span.textContent = label;
+      document.body.appendChild(span);
+      state.overlays.push(span);
+      state.labels.set(label, hit);
+    });
+  }
+
+  function mdpSelectFilterLabels(prefix) {
+    for (const span of state.overlays) {
+      if (span.dataset.mdpSelectKind !== 'label') continue;
+      const label = span.dataset.mdpSelectLabel || '';
+      if (label.startsWith(prefix)) {
+        span.style.display = '';
+        span.textContent = label.slice(prefix.length) || label;
+      } else {
+        span.style.display = 'none';
+      }
+    }
+  }
+
+  function mdpSelectStartPick() {
+    mdpSelectReset(false);
+    setMode('pickChar');
+    document.body.classList.add('mdp-select-mode');
+  }
+  window.mdpSelectStartPick = mdpSelectStartPick;
+
+  function rangeFromPoint(x, y) {
+    if (document.caretRangeFromPoint) return document.caretRangeFromPoint(x, y);
+    if (document.caretPositionFromPoint) {
+      const pos = document.caretPositionFromPoint(x, y);
+      if (!pos) return null;
+      const range = document.createRange();
+      range.setStart(pos.offsetNode, pos.offset);
+      range.collapse(true);
+      return range;
+    }
+    return null;
+  }
+  function firstTextNode(el) {
+    if (!el) return null;
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        return node.nodeValue ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+      }
+    });
+    return walker.nextNode();
+  }
+  function mdpSelectStartCenter() {
+    mdpSelectReset(false);
+    const x = Math.floor(window.innerWidth / 2);
+    const y = Math.floor(window.innerHeight / 2);
+    let range = rangeFromPoint(x, y);
+    if (range && range.startContainer.nodeType === Node.TEXT_NODE && insideContent(range.startContainer)) {
+      mdpSelectJumpTo(range.startContainer, range.startOffset);
+      return;
+    }
+    for (const el of document.elementsFromPoint(x, y)) {
+      if (!insideContent(el)) continue;
+      const node = firstTextNode(el);
+      if (node) {
+        mdpSelectJumpTo(node, 0);
+        return;
+      }
+    }
+    mdpSelectToast('no text at viewport center');
+  }
+  window.mdpSelectStartCenter = mdpSelectStartCenter;
+
+  async function mdpSelectYank() {
+    const text = window.getSelection().toString();
+    try {
+      await navigator.clipboard.writeText(text);
+      mdpSelectToast('yanked ' + text.length + ' chars');
+      mdpSelectBail();
+    } catch (err) {
+      mdpSelectToast('clipboard failed: ' + err.message);
+    }
+  }
+
+  function mdpSelectOnKeydown(e) {
+    if (isEditable(e.target) || blockedByOverlay()) return;
+    if (state.mode === 'idle' || state.mode === 'visual') {
+      if (HOP_ENABLED && isKey(e, 'select_pick')) {
+        e.preventDefault();
+        mdpSelectStartPick();
+        return;
+      }
+      if (VISUAL_ENABLED && isKey(e, 'select_visual')) {
+        e.preventDefault();
+        mdpSelectStartCenter();
+        return;
+      }
+      if (state.mode === 'idle') return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      mdpSelectBail();
+      return;
+    }
+    if (state.mode === 'pickChar') {
+      if (e.ctrlKey || e.metaKey || e.altKey || e.key.length !== 1) return;
+      e.preventDefault();
+      mdpSelectPaintLabels(e.key);
+      return;
+    }
+    if (state.mode === 'labeled') {
+      if (e.ctrlKey || e.metaKey || e.altKey || e.key.length !== 1) return;
+      e.preventDefault();
+      state.partialKey += e.key;
+      if (state.partialKey.length < state.labelLen) {
+        mdpSelectFilterLabels(state.partialKey);
+        return;
+      }
+      const hit = state.labels.get(state.partialKey);
+      if (!hit) {
+        mdpSelectBail();
+        return;
+      }
+      mdpSelectJumpTo(hit.node, hit.offset);
+      return;
+    }
+    if (state.mode === 'visual') {
+      // Digit prefix builds a count: '10h' moves 10 chars left. A bare
+      // '0' (no buffer) is treated as a motion (line start) below.
+      if (e.key.length === 1 && e.key >= '0' && e.key <= '9' &&
+          !(e.key === '0' && !state.countBuffer)) {
+        e.preventDefault();
+        state.countBuffer += e.key;
+        return;
+      }
+      const count = Math.max(1, parseInt(state.countBuffer || '1', 10));
+      state.countBuffer = '';
+      if (isKey(e, 'select_left')) {
+        e.preventDefault();
+        for (let i = 0; i < count; i++) mdpSelectMoveChar(-1);
+      } else if (isKey(e, 'select_right')) {
+        e.preventDefault();
+        for (let i = 0; i < count; i++) mdpSelectMoveChar(1);
+      } else if (isKey(e, 'select_down')) {
+        e.preventDefault();
+        for (let i = 0; i < count; i++) mdpSelectMoveLine(1);
+      } else if (isKey(e, 'select_up')) {
+        e.preventDefault();
+        for (let i = 0; i < count; i++) mdpSelectMoveLine(-1);
+      } else if (isKey(e, 'select_word_next')) {
+        e.preventDefault();
+        for (let i = 0; i < count; i++) mdpSelectMoveWord(1);
+      } else if (isKey(e, 'select_word_prev')) {
+        e.preventDefault();
+        for (let i = 0; i < count; i++) mdpSelectMoveWord(-1);
+      } else if (isKey(e, 'select_line_start')) {
+        e.preventDefault();
+        mdpSelectMoveToLineStart();
+      } else if (isKey(e, 'select_line_end')) {
+        e.preventDefault();
+        mdpSelectMoveToLineEnd();
+      } else if (isKey(e, 'select_top')) {
+        e.preventDefault();
+        mdpSelectMoveToTop();
+      } else if (isKey(e, 'select_bottom')) {
+        e.preventDefault();
+        mdpSelectMoveToBottom();
+      } else if (isKey(e, 'select_yank')) {
+        e.preventDefault();
+        mdpSelectYank();
+      } else if (isKey(e, 'select_toggle_lines')) {
+        e.preventDefault();
+        if (state.lineListening) {
+          mdpSelectStopLineNumbers();
+          clearOverlays('line');
+        } else {
+          mdpSelectStartLineNumbers();
+        }
+      }
+    }
+  }
+  document.addEventListener('keydown', mdpSelectOnKeydown, true);
+})();
+`
+
+func buildSelectScript(keys KeyBindings, hop, visual bool) string {
+	if !hop && !visual {
+		return ""
+	}
+	s := strings.ReplaceAll(selectScriptTemplate, "__HOP_ENABLED__", fmt.Sprintf("%t", hop))
+	s = strings.ReplaceAll(s, "__VISUAL_ENABLED__", fmt.Sprintf("%t", visual))
+	s = strings.ReplaceAll(s, "__SELECT_KEYS_JSON__", keysJSON(keys))
+	return s
 }
 
 // __PORT__ is replaced with the server port at runtime.
@@ -1012,6 +1575,7 @@ __VIM_KEYS__
 __SHARED_NAV_SCRIPT__
 __TREE_SCRIPT__
 __FINDER_SCRIPT__
+__VISUAL_SELECT_SCRIPT__
 __WS_SCRIPT__
 </script>
 </body>
@@ -1027,12 +1591,12 @@ __WS_SCRIPT__
 // (only meaningful when at least one of fileTree/fuzzyFinder is on);
 // empty in WS mode (the page fetches /tree on demand).
 func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, currentFile string, fileTree, fuzzyFinder bool, staticTreeJSON string) string {
-	return BuildPageWithKeys(body, theme, wsPort, extraCSS, colemak, currentFile, fileTree, fuzzyFinder, staticTreeJSON, nil)
+	return BuildPageWithKeys(body, theme, wsPort, extraCSS, colemak, currentFile, fileTree, fuzzyFinder, staticTreeJSON, false, false, nil)
 }
 
 // BuildPageWithKeys is BuildPage plus user key overrides. Unknown actions are
 // ignored; an empty key disables that action.
-func BuildPageWithKeys(body, theme string, wsPort int, extraCSS string, colemak bool, currentFile string, fileTree, fuzzyFinder bool, staticTreeJSON string, keyOverrides map[string]string) string {
+func BuildPageWithKeys(body, theme string, wsPort int, extraCSS string, colemak bool, currentFile string, fileTree, fuzzyFinder bool, staticTreeJSON string, hop, visual bool, keyOverrides map[string]string) string {
 	// Make every <img> async + lazy so external image fetches
 	// (shields.io badges, remote screenshots, etc.) don't block
 	// first-contentful-paint. Measured ~500ms cold-start improvement
@@ -1076,6 +1640,7 @@ func BuildPageWithKeys(body, theme string, wsPort int, extraCSS string, colemak 
 	}
 
 	treeDOM, treeScript, finderDOM, finderScript, sharedNavScript := "", "", "", "", ""
+	selectScript := buildSelectScript(keys, hop, visual)
 	if fileTree {
 		treeDOM = `<div id="mdp-tree" hidden>` +
 			`<div class="mdp-tree-header"><span>Files</span>` +
@@ -1120,6 +1685,7 @@ func BuildPageWithKeys(body, theme string, wsPort int, extraCSS string, colemak 
 		"__SHARED_NAV_SCRIPT__", sharedNavScript,
 		"__TREE_SCRIPT__", treeScript,
 		"__FINDER_SCRIPT__", finderScript,
+		"__VISUAL_SELECT_SCRIPT__", selectScript,
 		"__WS_SCRIPT__", wsScript,
 	).Replace(pageTemplate)
 }

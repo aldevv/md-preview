@@ -136,6 +136,8 @@ edit       = false           # default for -e (also open nvim). Override with -e
 colemak    = false           # swap in-page nav keys j/k/l → n/e/i
 file_tree    = true          # Tab toggles a sidebar listing previewable files
 fuzzy_finder = true          # Ctrl+P opens a fuzzy file finder
+hop    = true                # s enters a hop-style visible-character picker
+visual = true                # v enters visual selection mode at viewport center
 
 [keys]
 down = "j"
@@ -145,6 +147,8 @@ right = "l"
 tree_toggle = "Tab"
 tree_open = "Enter"
 finder_open = "Ctrl+p"
+select_pick = "s"
+select_visual = "v"
 ```
 
 Key values use browser `KeyboardEvent.key` names (`j`, `ArrowDown`,
@@ -155,7 +159,13 @@ Unknown key actions are ignored, and an empty string disables that action.
 Supported actions: `down`, `up`, `left`, `right`, `half_down`, `half_up`,
 `full_down`, `full_up`, `top`, `bottom`, `history_back`, `history_forward`,
 `close`, `reload`, `tree_toggle`, `tree_down`, `tree_up`, `tree_left`,
-`tree_right`, `tree_open`, `finder_open`.
+`tree_right`, `tree_open`, `finder_open`, `select_pick`, `select_visual`,
+`select_left`, `select_right`, `select_yank`.
+
+With `hop` enabled, `select_pick` starts a visible-character picker: type a
+target character, then type its on-screen label. With `visual` enabled,
+`select_visual` starts a selection at the viewport center; `select_left` /
+`select_right` extend it and `select_yank` copies it.
 
 CLI flags override config values.
 

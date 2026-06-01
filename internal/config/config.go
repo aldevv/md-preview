@@ -28,6 +28,8 @@ type Config struct {
 	Colemak     bool              `toml:"colemak"`
 	FileTree    bool              `toml:"file_tree"`
 	FuzzyFinder bool              `toml:"fuzzy_finder"`
+	Hop         bool              `toml:"hop"`
+	Visual      bool              `toml:"visual"`
 	Keys        map[string]string `toml:"keys"`
 	// PreferRunningBrowser: when true (default) and the user hasn't
 	// pinned a browser, mdp skips the native window if a chromium-
@@ -66,6 +68,8 @@ const defaultConfigTemplate = `# md-preview config: uncomment any line to overri
 # colemak    = false            # swap in-page nav keys j/k/l → n/e/i
 # file_tree    = true           # Tab toggles a sidebar listing previewable files
 # fuzzy_finder = true           # Ctrl+P opens a fuzzy file finder
+# hop    = true                 # 's' enters a hop.nvim-style char picker that jumps the caret
+# visual = true                 # 'v' enters visual mode at the viewport center; h/l extend, 'y' yanks
 # prefer_running_browser = true # if a chromium-family browser is already running, route the preview to it (faster than cold-starting the native window)
 
 # [keys]
@@ -75,6 +79,12 @@ const defaultConfigTemplate = `# md-preview config: uncomment any line to overri
 # right = "l"
 # tree_toggle = "Tab"
 # tree_open = "Enter"
+# finder_open = "Ctrl+p"
+# select_pick = "s"
+# select_visual = "v"
+# zoom_in = "+"
+# zoom_out = "-"
+# zoom_reset = "0"
 `
 
 // EnsureDefault writes a commented default config file to Path() when one
@@ -115,7 +125,7 @@ func Load() (Config, error) {
 // decode merges user overrides over this struct, so an absent key keeps
 // the default and an explicit `false` (or other zero value) wins.
 func defaults() Config {
-	return Config{FileTree: true, FuzzyFinder: true}
+	return Config{FileTree: true, FuzzyFinder: true, Hop: true, Visual: true}
 }
 
 // ExpandTilde replaces a leading "~/" with the user's home directory. Bare
