@@ -221,6 +221,51 @@ func TestLoad_DisablesHopAndVisual(t *testing.T) {
 	}
 }
 
+func TestLoad_AskDefaultsOn(t *testing.T) {
+	writeConfig(t, "theme = \"dark\"\n")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() err = %v", err)
+	}
+	if !cfg.Ask {
+		t.Errorf("Ask = false, want true default")
+	}
+	if cfg.AskCommand != "" {
+		t.Errorf("AskCommand = %q, want empty default", cfg.AskCommand)
+	}
+	if cfg.AskTimeoutSec != 0 {
+		t.Errorf("AskTimeoutSec = %d, want 0 default", cfg.AskTimeoutSec)
+	}
+}
+
+func TestLoad_AskCanBeDisabled(t *testing.T) {
+	writeConfig(t, "ask = false\n")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() err = %v", err)
+	}
+	if cfg.Ask {
+		t.Errorf("Ask = true, want false")
+	}
+}
+
+func TestLoad_AskDecodes(t *testing.T) {
+	writeConfig(t, "ask = true\nask_command = \"my-claude --print\"\nask_timeout_sec = 30\n")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() err = %v", err)
+	}
+	if !cfg.Ask {
+		t.Errorf("Ask = false, want true")
+	}
+	if cfg.AskCommand != "my-claude --print" {
+		t.Errorf("AskCommand = %q, want %q", cfg.AskCommand, "my-claude --print")
+	}
+	if cfg.AskTimeoutSec != 30 {
+		t.Errorf("AskTimeoutSec = %d, want 30", cfg.AskTimeoutSec)
+	}
+}
+
 func TestExpandTilde(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {

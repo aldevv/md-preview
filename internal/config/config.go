@@ -30,7 +30,13 @@ type Config struct {
 	FuzzyFinder bool              `toml:"fuzzy_finder"`
 	Hop         bool              `toml:"hop"`
 	Visual      bool              `toml:"visual"`
-	Keys        map[string]string `toml:"keys"`
+	Ask         bool              `toml:"ask"`
+	AskCommand  string            `toml:"ask_command"`
+	// AskTimeoutSec caps the ask subprocess wall-clock. 0 means
+	// "use the built-in default" (60s). Negative or huge values
+	// are clamped at the server.
+	AskTimeoutSec int               `toml:"ask_timeout_sec"`
+	Keys          map[string]string `toml:"keys"`
 	// PreferRunningBrowser: when true (default) and the user hasn't
 	// pinned a browser, mdp skips the native window if a chromium-
 	// family browser process is already running and routes the
@@ -85,6 +91,10 @@ const defaultConfigTemplate = `# md-preview config: uncomment any line to overri
 # zoom_in = "+"
 # zoom_out = "-"
 # zoom_reset = "0"
+
+# ask              = true        # 'c' in visual mode (and the top-right star) sends the selection + a prompt to claude -p
+# ask_command      = "claude -p" # command to spawn; receives the constructed prompt on stdin
+# ask_timeout_sec  = 60          # hard cap on the spawned process (1-600)
 `
 
 // EnsureDefault writes a commented default config file to Path() when one
@@ -125,7 +135,7 @@ func Load() (Config, error) {
 // decode merges user overrides over this struct, so an absent key keeps
 // the default and an explicit `false` (or other zero value) wins.
 func defaults() Config {
-	return Config{FileTree: true, FuzzyFinder: true, Hop: true, Visual: true}
+	return Config{FileTree: true, FuzzyFinder: true, Hop: true, Visual: true, Ask: true}
 }
 
 // ExpandTilde replaces a leading "~/" with the user's home directory. Bare
@@ -258,6 +268,19 @@ var runningChromiumWindowsImages = map[string]string{
 	"vivaldi.exe":  "vivaldi",
 }
 
+// isShellWrapperBin reports whether path looks like a shell interpreter
+// rather than a browser binary. Some distros (snap brave / chromium,
+// some flatpaks) ship the launcher as a shell script whose /proc/PID/exe
+// resolves to the interpreter; spawning that with --app= silently no-ops,
+// so the caller has to fall through to the lookPath fallback.
+func isShellWrapperBin(path string) bool {
+	switch filepath.Base(path) {
+	case "bash", "sh", "dash", "zsh", "ksh", "fish":
+		return true
+	}
+	return false
+}
+
 // RunningChromiumBin returns the executable path of a chromium-family
 // browser process detected as running, or "" when none is found.
 // Linux scans /proc/PID/comm; darwin runs `ps -A -o comm=`; windows
@@ -295,7 +318,9 @@ func runningChromiumLinux(lookPath func(string) (string, error)) string {
 			continue
 		}
 		if exe, err := os.Readlink("/proc/" + name + "/exe"); err == nil && exe != "" {
-			return exe
+			if !isShellWrapperBin(exe) {
+				return exe
+			}
 		}
 		if p, err := lookPath(launcher); err == nil && p != "" {
 			return p

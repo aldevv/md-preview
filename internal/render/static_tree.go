@@ -37,11 +37,17 @@ type StaticTreeOptions struct {
 	FuzzyFinder bool
 	Hop         bool
 	Visual      bool
+	Ask         bool
 	Keys        map[string]string
 	// MaxFiles overrides StaticTreeMaxFiles when nonzero.
 	MaxFiles int
 	// PandocBudget overrides StaticTreePandocBudget when nonzero.
 	PandocBudget int
+	// SidecarURL, when non-empty, gets injected into every rendered
+	// page as window.__MDP_SIDECAR_URL__ so the AI icon / 'c' key
+	// can navigate to <SidecarURL>/promote to upgrade the static
+	// preview into a live watch session.
+	SidecarURL string
 }
 
 // TmpHTMLPath returns the stable per-source tmp HTML file used by the
@@ -168,7 +174,8 @@ func RenderStaticTree(entry, tmpDir string, opts StaticTreeOptions) (string, err
 			}
 			return FileURL(resolved), true
 		})
-		page := BuildPageWithKeys(rewritten, opts.Theme, 0, opts.ExtraCSS, opts.Colemak, src, opts.FileTree, opts.FuzzyFinder, treeJSON, opts.Hop, opts.Visual, opts.Keys)
+		page := BuildPageWithKeys(rewritten, opts.Theme, 0, opts.ExtraCSS, opts.Colemak, src, opts.FileTree, opts.FuzzyFinder, treeJSON, opts.Hop, opts.Visual, opts.Ask, opts.Keys)
+		page = InjectSidecarURL(page, opts.SidecarURL)
 		if err := writeStaticTmpFile(rendered[src], []byte(page)); err != nil {
 			return "", err
 		}
@@ -403,6 +410,21 @@ func pathInsideDir(cleanPath, dir string) bool {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+// InjectSidecarURL inserts a tiny <script> setting window.__MDP_SIDECAR_URL__
+// just before </head> so the global is in scope by the time the body
+// scripts run. Empty url passes the page through unchanged.
+func InjectSidecarURL(page, url string) string {
+	if url == "" {
+		return page
+	}
+	quoted, err := json.Marshal(url)
+	if err != nil {
+		return page
+	}
+	script := `<script>window.__MDP_SIDECAR_URL__ = ` + string(quoted) + `;</script>`
+	return strings.Replace(page, "</head>", script+"</head>", 1)
 }
 
 // O_NOFOLLOW defends against a shared-tmp symlink attack aiming our

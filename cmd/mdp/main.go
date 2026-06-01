@@ -13,7 +13,9 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	htmlpkg "html"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -209,6 +211,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, env Environme
 			return runUpdate(args[1:], stdout, stderr, env)
 		case "__window":
 			return runWindow(args[1:], stderr, env)
+		case "__sidecar":
+			return runSidecar(args[1:], stderr)
 		case "help":
 			fmt.Fprint(stdout, usage)
 			return 0
@@ -257,12 +261,23 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, env Environme
 	// child exits silently on EOF. Skipped entirely when we already
 	// know a warm chromium browser is going to handle the preview.
 	var childStdin io.WriteCloser
-	if runningChromium == "" && !flags.printPath && wantNative() && env.StartWindowChild != nil {
+	if runningChromium == "" && !flags.printPath && !isPDFPath(rc.src) && wantNative() && env.StartWindowChild != nil {
 		if pipe, err := env.StartWindowChild(); err == nil {
 			childStdin = pipe
 			parentMark("StartWindowChild spawned")
 		} else if err != nativewin.ErrUnsupported {
 			fmt.Fprintf(stderr, "mdp: window child unavailable (%v); falling back to inline/browser\n", err)
+		}
+	}
+
+	// Promote-on-demand sidecar: a tiny background process the static
+	// page can navigate to (AI icon click, 'c' key) to upgrade itself
+	// into a live watch session. The spawn is fire-and-forget on a
+	// deterministic per-file port so the parent never waits on it.
+	if !flags.printPath && rc.cfg.Ask && !isPDFPath(rc.src) && render.IsWalkableExt(rc.src) {
+		rc.sidecarURL = startSidecar(rc, env, stderr)
+		if rc.sidecarURL != "" {
+			parentMark("sidecar dispatched to " + rc.sidecarURL)
 		}
 	}
 
@@ -284,12 +299,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, env Environme
 	}
 
 	url := "file://" + tmpPath
+	skipNative := isPDFPath(rc.src)
 	switch {
 	case runningChromium != "":
 		argv := []string{runningChromium, "--app=" + url}
 		if err := env.Spawn(argv); err != nil {
 			fmt.Fprintf(stderr, "mdp: launching running browser: %v\n", err)
-			if !openPreview(url, rc.cfg, env, stderr) {
+			if !openPreview(url, rc.cfg, env, stderr, skipNative) {
 				return 1
 			}
 		}
@@ -300,12 +316,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, env Environme
 		parentMark("URL written to child stdin")
 		if werr != nil {
 			fmt.Fprintf(stderr, "mdp: sending URL to window child: %v\n", werr)
-			if !openPreview(url, rc.cfg, env, stderr) {
+			if !openPreview(url, rc.cfg, env, stderr, skipNative) {
 				return 1
 			}
 		}
 	default:
-		if !openPreview(url, rc.cfg, env, stderr) {
+		if !openPreview(url, rc.cfg, env, stderr, skipNative) {
 			return 1
 		}
 	}
@@ -321,9 +337,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, env Environme
 // runtime unavailable, or spawn failed). It tries inline OpenWindow
 // (blocks until the window closes), then falls back to a browser
 // spawn with the #mdp-install-chrome hash appended for non-chromium
-// fallback launches.
-func openPreview(url string, cfg config.Config, env Environment, stderr io.Writer) bool {
-	if wantNative() && env.OpenWindow != nil {
+// fallback launches. skipNative bypasses the WebKit window entirely
+// (PDFs are routed straight to the browser since WebKit can't render
+// embedded application/pdf content).
+func openPreview(url string, cfg config.Config, env Environment, stderr io.Writer, skipNative bool) bool {
+	if !skipNative && wantNative() && env.OpenWindow != nil {
 		if err := env.OpenWindow(url); err == nil {
 			return true
 		} else if err != nativewin.ErrUnsupported {
@@ -507,9 +525,10 @@ func parseRunFlags(args []string, stdout, stderr io.Writer) (flags runFlags, exi
 }
 
 type resolved struct {
-	src   string
-	theme string
-	cfg   config.Config
+	src        string
+	theme      string
+	cfg        config.Config
+	sidecarURL string
 }
 
 // onFzfMissing fires when no positional was given and fzf is unavailable;
@@ -574,10 +593,44 @@ func resolveAndValidate(positional, themeFlag string, env Environment, stderr io
 }
 
 func renderEntry(rc resolved, env Environment, stderr io.Writer) (string, bool) {
+	if isPDFPath(rc.src) {
+		path, err := renderPDFWrapper(rc.src, rc.theme, env.TempDir())
+		if err != nil {
+			fmt.Fprintf(stderr, "mdp: %v\n", err)
+			return "", false
+		}
+		return path, true
+	}
 	if render.IsWalkableExt(rc.src) {
 		return renderEntryAsStaticTree(rc, env, stderr)
 	}
 	return renderEntryAsSingleFile(rc, env, stderr)
+}
+
+func isPDFPath(p string) bool {
+	return strings.EqualFold(filepath.Ext(p), ".pdf")
+}
+
+// renderPDFWrapper writes a chromeless HTML shell that embeds the PDF so
+// chrome's --app= mode (no toolbar, no URL bar) hosts the built-in PDF
+// viewer for it. Returns the path to the wrapper HTML.
+func renderPDFWrapper(pdfPath, theme, tmpDir string) (string, error) {
+	bg := "#1e1e1e"
+	if theme == "light" {
+		bg = "#ffffff"
+	}
+	pdfURL := (&url.URL{Scheme: "file", Path: pdfPath}).String()
+	html := fmt.Sprintf(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>%s</title>
+<style>html,body{margin:0;padding:0;height:100%%;background:%s;overflow:hidden}
+embed{display:block;width:100vw;height:100vh;border:0}</style>
+</head><body><embed src="%s" type="application/pdf"></body></html>`,
+		htmlpkg.EscapeString(filepath.Base(pdfPath)), bg, htmlpkg.EscapeString(pdfURL))
+	out := tmpHTMLPath(tmpDir, pdfPath)
+	if err := os.WriteFile(out, []byte(html), 0o644); err != nil {
+		return "", err
+	}
+	return out, nil
 }
 
 func renderEntryAsStaticTree(rc resolved, env Environment, stderr io.Writer) (string, bool) {
@@ -589,7 +642,9 @@ func renderEntryAsStaticTree(rc resolved, env Environment, stderr io.Writer) (st
 		FuzzyFinder: rc.cfg.FuzzyFinder,
 		Hop:         rc.cfg.Hop,
 		Visual:      rc.cfg.Visual,
+		Ask:         rc.cfg.Ask,
 		Keys:        rc.cfg.Keys,
+		SidecarURL:  rc.sidecarURL,
 	}
 	entryHTML, err := render.RenderStaticTree(rc.src, env.TempDir(), opts)
 	if err != nil {
@@ -613,7 +668,8 @@ func renderEntryAsSingleFile(rc resolved, env Environment, stderr io.Writer) (st
 		}
 		return render.FileURL(abs), true
 	})
-	page := render.BuildPageWithKeys(body, rc.theme, 0, config.ExtraCSS(rc.cfg, stderr), rc.cfg.Colemak, rc.src, false, false, "", rc.cfg.Hop, rc.cfg.Visual, rc.cfg.Keys)
+	page := render.BuildPageWithKeys(body, rc.theme, 0, config.ExtraCSS(rc.cfg, stderr), rc.cfg.Colemak, rc.src, false, false, "", rc.cfg.Hop, rc.cfg.Visual, rc.cfg.Ask, rc.cfg.Keys)
+	page = render.InjectSidecarURL(page, rc.sidecarURL)
 	tmpPath := tmpHTMLPath(env.TempDir(), rc.src)
 	if err := writeTmpFile(tmpPath, []byte(page)); err != nil {
 		fmt.Fprintf(stderr, "mdp: writing tmp: %v\n", err)
@@ -750,17 +806,20 @@ func runWatchSubcommand(args []string, stdout, stderr io.Writer, env Environment
 	}
 
 	opts := server.Options{
-		File:        rc.src,
-		Port:        0,
-		Theme:       rc.theme,
-		Colemak:     rc.cfg.Colemak,
-		FileTree:    rc.cfg.FileTree,
-		FuzzyFinder: rc.cfg.FuzzyFinder,
-		Hop:         rc.cfg.Hop,
-		Visual:      rc.cfg.Visual,
-		Keys:        rc.cfg.Keys,
-		Watch:       true,
-		ExtraCSS:    config.ExtraCSS(rc.cfg, stderr),
+		File:          rc.src,
+		Port:          0,
+		Theme:         rc.theme,
+		Colemak:       rc.cfg.Colemak,
+		FileTree:      rc.cfg.FileTree,
+		FuzzyFinder:   rc.cfg.FuzzyFinder,
+		Hop:           rc.cfg.Hop,
+		Visual:        rc.cfg.Visual,
+		Ask:           rc.cfg.Ask,
+		AskCommand:    rc.cfg.AskCommand,
+		AskTimeoutSec: rc.cfg.AskTimeoutSec,
+		Keys:          rc.cfg.Keys,
+		Watch:         true,
+		ExtraCSS:      config.ExtraCSS(rc.cfg, stderr),
 	}
 
 	if wantNative() && env.OpenWindow != nil {
@@ -862,16 +921,19 @@ func runServe(args []string, stdin io.Reader, stderr io.Writer, env Environment)
 		}
 	}
 	opts := server.Options{
-		File:        args[0],
-		Port:        port,
-		Theme:       args[2],
-		Colemak:     colemak,
-		FileTree:    cfg.FileTree,
-		FuzzyFinder: cfg.FuzzyFinder,
-		Hop:         cfg.Hop,
-		Visual:      cfg.Visual,
-		Keys:        cfg.Keys,
-		ExtraCSS:    config.ExtraCSS(cfg, stderr),
+		File:          args[0],
+		Port:          port,
+		Theme:         args[2],
+		Colemak:       colemak,
+		FileTree:      cfg.FileTree,
+		FuzzyFinder:   cfg.FuzzyFinder,
+		Hop:           cfg.Hop,
+		Visual:        cfg.Visual,
+		Ask:           cfg.Ask,
+		AskCommand:    cfg.AskCommand,
+		AskTimeoutSec: cfg.AskTimeoutSec,
+		Keys:          cfg.Keys,
+		ExtraCSS:      config.ExtraCSS(cfg, stderr),
 	}
 	// Direct-shell invocations (stdin is a TTY) get the native window
 	// like plain mdp/watch. The nvim plugin spawns mdp serve with a

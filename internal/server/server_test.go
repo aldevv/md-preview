@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,6 +59,188 @@ func TestHandler_GetHTML_ReturnsPage(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "Hello") {
 		t.Errorf("body missing 'Hello'")
+	}
+}
+
+func TestHandler_Ask_DisabledRouteUnreachable(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	s := newTestState(t, file)
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/ask", "application/json", strings.NewReader(`{"prompt":"q"}`))
+	if err != nil {
+		t.Fatalf("POST /ask: %v", err)
+	}
+	resp.Body.Close()
+	// With ask disabled the route is not registered; POST /ask falls
+	// through to the catch-all GET / handler and is rejected with 405.
+	if resp.StatusCode != http.StatusMethodNotAllowed && resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 or 405 when ask disabled", resp.StatusCode)
+	}
+}
+
+func TestHandler_Ask_StubReturnsRenderedMarkdown(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	s := newTestState(t, file)
+	s.ask = true
+	s.askCommand = "fake-claude"
+	s.askTimeout = 5 * time.Second
+	var gotStdin []byte
+	var gotArgv []string
+	s.runAsk = func(ctx context.Context, argv []string, stdin []byte) ([]byte, []byte, error) {
+		gotArgv = argv
+		gotStdin = stdin
+		return []byte("# answer\n\nhi"), nil, nil
+	}
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	body, _ := json.Marshal(map[string]string{"selection": "hello world", "prompt": "explain"})
+	resp, err := http.Post(srv.URL+"/ask", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /ask: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	var got map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	html, _ := got["html"].(string)
+	if !strings.Contains(html, "<h1") || !strings.Contains(html, "answer") {
+		t.Errorf("html = %q, want rendered <h1>answer</h1>", html)
+	}
+	if !strings.Contains(string(gotStdin), "hello world") || !strings.Contains(string(gotStdin), "explain") {
+		t.Errorf("runAsk stdin = %q, want both selection and prompt", string(gotStdin))
+	}
+	if len(gotArgv) == 0 || gotArgv[0] != "fake-claude" {
+		t.Errorf("runAsk argv = %v, want [fake-claude]", gotArgv)
+	}
+}
+
+func TestHandler_Ask_CommandError(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	s := newTestState(t, file)
+	s.ask = true
+	s.askCommand = "fake"
+	s.askTimeout = 5 * time.Second
+	s.runAsk = func(ctx context.Context, argv []string, stdin []byte) ([]byte, []byte, error) {
+		return nil, []byte("auth failure: token expired\n"), errors.New("exit status 1")
+	}
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	body, _ := json.Marshal(map[string]string{"prompt": "q"})
+	resp, err := http.Post(srv.URL+"/ask", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /ask: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", resp.StatusCode)
+	}
+	var got map[string]string
+	_ = json.NewDecoder(resp.Body).Decode(&got)
+	if !strings.Contains(got["error"], "auth failure") {
+		t.Errorf("error = %q, want stderr snippet", got["error"])
+	}
+}
+
+func TestHandler_Ask_Timeout(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	s := newTestState(t, file)
+	s.ask = true
+	s.askCommand = "fake"
+	s.askTimeout = 5 * time.Second
+	s.runAsk = func(ctx context.Context, argv []string, stdin []byte) ([]byte, []byte, error) {
+		return nil, nil, context.DeadlineExceeded
+	}
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	body, _ := json.Marshal(map[string]string{"prompt": "q"})
+	resp, err := http.Post(srv.URL+"/ask", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /ask: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusGatewayTimeout {
+		t.Errorf("status = %d, want 504", resp.StatusCode)
+	}
+}
+
+func TestHandler_Ask_EmptyPromptRejected(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	s := newTestState(t, file)
+	s.ask = true
+	s.runAsk = func(ctx context.Context, argv []string, stdin []byte) ([]byte, []byte, error) {
+		t.Fatal("runAsk should not be called when prompt is empty")
+		return nil, nil, nil
+	}
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/ask", "application/json", strings.NewReader(`{"prompt":""}`))
+	if err != nil {
+		t.Fatalf("POST /ask: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for empty prompt", resp.StatusCode)
+	}
+}
+
+func TestHandler_Ask_OversizedBody(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	s := newTestState(t, file)
+	s.ask = true
+	s.runAsk = func(ctx context.Context, argv []string, stdin []byte) ([]byte, []byte, error) {
+		t.Fatal("runAsk should not be called for oversized body")
+		return nil, nil, nil
+	}
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	huge := bytes.Repeat([]byte("a"), maxJSONBodyBytes+1)
+	resp, err := http.Post(srv.URL+"/ask", "application/json", bytes.NewReader(huge))
+	if err != nil {
+		t.Fatalf("POST /ask: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413 for oversized body", resp.StatusCode)
+	}
+}
+
+func TestHandler_Ask_RejectsForeignOrigin(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	s := newTestState(t, file)
+	s.ask = true
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/ask", strings.NewReader(`{"prompt":"q"}`))
+	req.Header.Set("Origin", "http://evil.example.com")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /ask: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 for foreign origin", resp.StatusCode)
 	}
 }
 

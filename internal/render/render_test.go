@@ -729,7 +729,7 @@ func TestBuildPage_Colemak(t *testing.T) {
 }
 
 func TestBuildPageWithKeys_CustomOverrides(t *testing.T) {
-	page := BuildPageWithKeys("<p>x</p>", "dark", 0, "", false, "", true, true, "", false, false, map[string]string{
+	page := BuildPageWithKeys("<p>x</p>", "dark", 0, "", false, "", true, true, "", false, false, false, map[string]string{
 		"down":        "s",
 		"tree_toggle": "t",
 		"tree_open":   "o",
@@ -752,7 +752,7 @@ func TestBuildPageWithKeys_CustomOverrides(t *testing.T) {
 }
 
 func TestBuildPage_HopOnly(t *testing.T) {
-	page := BuildPageWithKeys("<p>x</p>", "dark", 0, "", false, "", false, false, "", true, false, nil)
+	page := BuildPageWithKeys("<p>x</p>", "dark", 0, "", false, "", false, false, "", true, false, false, nil)
 	for _, want := range []string{"mdpSelectStartPick", "HOP_ENABLED = true", `"select_pick":"s"`} {
 		if !strings.Contains(page, want) {
 			t.Errorf("hop-only page missing %q", want)
@@ -764,7 +764,7 @@ func TestBuildPage_HopOnly(t *testing.T) {
 }
 
 func TestBuildPage_VisualOnly(t *testing.T) {
-	page := BuildPageWithKeys("<p>x</p>", "dark", 0, "", false, "", false, false, "", false, true, nil)
+	page := BuildPageWithKeys("<p>x</p>", "dark", 0, "", false, "", false, false, "", false, true, false, nil)
 	for _, want := range []string{"mdpSelectStartCenter", "VISUAL_ENABLED = true", `"select_visual":"v"`} {
 		if !strings.Contains(page, want) {
 			t.Errorf("visual-only page missing %q", want)
@@ -776,7 +776,7 @@ func TestBuildPage_VisualOnly(t *testing.T) {
 }
 
 func TestBuildPage_HopAndVisual(t *testing.T) {
-	page := BuildPageWithKeys("<p>x</p>", "dark", 0, "", false, "", false, false, "", true, true, nil)
+	page := BuildPageWithKeys("<p>x</p>", "dark", 0, "", false, "", false, false, "", true, true, false, nil)
 	for _, want := range []string{"mdpSelectStartPick", "mdpSelectStartCenter", "mdpSelectPaintLineNumbers", "HOP_ENABLED = true", "VISUAL_ENABLED = true"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("hop+visual page missing %q", want)
@@ -785,10 +785,38 @@ func TestBuildPage_HopAndVisual(t *testing.T) {
 }
 
 func TestBuildPage_SelectModeOmitted(t *testing.T) {
-	page := BuildPageWithKeys("<p>x</p>", "dark", 0, "", false, "", false, false, "", false, false, nil)
+	page := BuildPageWithKeys("<p>x</p>", "dark", 0, "", false, "", false, false, "", false, false, false, nil)
 	for _, bad := range []string{"mdpSelectStartPick", "mdpSelectStartCenter", "mdpSelectPaintLineNumbers", "__VISUAL_SELECT_SCRIPT__"} {
 		if strings.Contains(page, bad) {
 			t.Errorf("select-disabled page should not contain %q", bad)
 		}
+	}
+}
+
+func TestBuildPage_AskGateOff(t *testing.T) {
+	page := BuildPageWithKeys("<p>x</p>", "dark", 0, "", false, "", false, false, "", true, true, false, nil)
+	if strings.Contains(page, "ASK_ENABLED = true") {
+		t.Errorf("ask-disabled page should not contain ASK_ENABLED = true")
+	}
+	if !strings.Contains(page, "ASK_ENABLED = false") {
+		t.Errorf("expected ASK_ENABLED = false in page with ask off")
+	}
+}
+
+func TestBuildPage_AskEnabled(t *testing.T) {
+	page := BuildPageWithKeys("<p>x</p>", "dark", 0, "", false, "", false, false, "", true, true, true, nil)
+	for _, want := range []string{"ASK_ENABLED = true", "mdpAskOpenInput", "mdpAskSubmit", `"select_ask":"c"`} {
+		if !strings.Contains(page, want) {
+			t.Errorf("ask-enabled page missing %q", want)
+		}
+	}
+}
+
+func TestBuildPage_AskRequiresVisual(t *testing.T) {
+	// ask=true but visual=false: ASK_ENABLED must be false (no UI without
+	// visual mode to host it).
+	page := BuildPageWithKeys("<p>x</p>", "dark", 0, "", false, "", false, false, "", true, false, true, nil)
+	if strings.Contains(page, "ASK_ENABLED = true") {
+		t.Errorf("ask without visual should resolve to ASK_ENABLED = false")
 	}
 }

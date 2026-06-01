@@ -163,6 +163,7 @@ func defaultKeyBindings(colemak bool) KeyBindings {
 		"select_bottom":    "G",
 		"select_yank":      "y",
 		"select_toggle_lines": "L",
+		"select_ask":          "c",
 		"zoom_in":         "+",
 		"zoom_out":        "-",
 		"zoom_reset":      "0",
@@ -655,6 +656,7 @@ const selectScriptTemplate = `
 (() => {
   const HOP_ENABLED = __HOP_ENABLED__;
   const VISUAL_ENABLED = __VISUAL_ENABLED__;
+  const ASK_ENABLED = __ASK_ENABLED__;
   const KEYS = __SELECT_KEYS_JSON__;
   const SINGLE_LABELS = 'abcdefghijklmnopqrstuvwxyz';
   const MAX_LABELED_HITS = SINGLE_LABELS.length * SINGLE_LABELS.length;
@@ -668,7 +670,15 @@ const selectScriptTemplate = `
     lineListening: false,
     labelLen: 1,
     partialKey: '',
-    countBuffer: ''
+    countBuffer: '',
+    askAbort: null,
+    askEl: null,
+    askInputEl: null,
+    askPillEl: null,
+    askStarEl: null,
+    askLastPrompt: '',
+    askAnchorRect: null,
+    askSelectionText: ''
   };
   window.mdpSelectState = state;
   window.mdpSelectIsActive = false;
@@ -731,6 +741,7 @@ const selectScriptTemplate = `
   function mdpSelectReset(keepSelection) {
     clearOverlays();
     mdpSelectStopLineNumbers();
+    if (ASK_ENABLED) { mdpAskCloseAll(); mdpAskHideSelectionStar(); }
     document.body.classList.remove('mdp-select-mode');
     if (!keepSelection) {
       const sel = window.getSelection();
@@ -794,6 +805,7 @@ const selectScriptTemplate = `
       end = state.anchor;
     }
     mdpSelectMakeSelection(start, end);
+    if (ASK_ENABLED) mdpAskShowSelectionStar();
   }
 
   function mdpSelectNodeAfter(node, dir) {
@@ -1067,6 +1079,233 @@ const selectScriptTemplate = `
     }
   }
 
+  function mdpAskSnapshotSelection() {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return null;
+    const text = sel.toString();
+    if (!text) return null;
+    const rect = sel.getRangeAt(0).getBoundingClientRect();
+    return { text, rect };
+  }
+  function mdpAskCloseAll() {
+    if (state.askAbort) { try { state.askAbort.abort(); } catch (_) {} state.askAbort = null; }
+    for (const k of ['askInputEl', 'askPillEl', 'askEl']) {
+      if (state[k]) { state[k].remove(); state[k] = null; }
+    }
+  }
+  // ASK_STAR_SVG is the Gemini-style four-point sparkle used for both
+  // the floating selection icon and the top-right whole-file icon.
+  const ASK_STAR_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">' +
+    '<path d="M12 2 C12 8 14 10 22 12 C14 14 12 16 12 22 C12 16 10 14 2 12 C10 10 12 8 12 2 Z" fill="currentColor"/>' +
+    '</svg>';
+  function mdpAskMakeStarButton(extraClass, label) {
+    const btn = document.createElement('button');
+    btn.className = 'mdp-ask-star' + (extraClass ? ' ' + extraClass : '');
+    btn.setAttribute('aria-label', label || 'Ask Claude');
+    btn.title = label || 'Ask Claude';
+    btn.innerHTML = ASK_STAR_SVG;
+    btn.addEventListener('mousedown', (e) => e.preventDefault());
+    return btn;
+  }
+  function mdpAskShowSelectionStar() {
+    if (!ASK_ENABLED || state.mode !== 'visual') return;
+    if (!mdpAskServerReachable()) return;
+    if (state.askStarEl) { state.askStarEl.remove(); state.askStarEl = null; }
+    if (state.askInputEl || state.askPillEl || state.askEl) return;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+    const rect = sel.getRangeAt(0).getBoundingClientRect();
+    if (!(rect.width || rect.height)) return;
+    const btn = mdpAskMakeStarButton('mdp-ask-star-floating', 'Ask Claude about selection');
+    btn.addEventListener('click', () => mdpAskOpenInput());
+    document.body.appendChild(btn);
+    const left = Math.min(window.innerWidth - 28, rect.right + 4);
+    const top = Math.max(8, rect.top - 4);
+    btn.style.left = Math.round(left + window.scrollX) + 'px';
+    btn.style.top = Math.round(top + window.scrollY) + 'px';
+    state.askStarEl = btn;
+  }
+  function mdpAskHideSelectionStar() {
+    if (state.askStarEl) { state.askStarEl.remove(); state.askStarEl = null; }
+  }
+  function mdpAskServerReachable() {
+    // /ask is HTTP-only; static mode (file://) has no server to hit.
+    return window.location.protocol !== 'file:';
+  }
+  function mdpAskSidecarURL() {
+    const u = window.__MDP_SIDECAR_URL__;
+    return (typeof u === 'string' && u) ? u : '';
+  }
+  function mdpAskPromoteViaSidecar() {
+    const u = mdpAskSidecarURL();
+    if (!u) { mdpSelectToast('promote unavailable'); return; }
+    window.location.href = u + '/promote';
+  }
+  function mdpAskInstallFab() {
+    if (!ASK_ENABLED) return;
+    const reachable = mdpAskServerReachable();
+    if (!reachable && !mdpAskSidecarURL()) return;
+    if (document.getElementById('mdp-ask-fab')) return;
+    const label = reachable ? 'Ask Claude about this file' : 'Enable Claude (switch to watch mode)';
+    const fab = mdpAskMakeStarButton('mdp-ask-fab', label);
+    fab.id = 'mdp-ask-fab';
+    fab.addEventListener('click', () => {
+      if (mdpAskServerReachable()) {
+        mdpAskOpenWholeFile();
+      } else {
+        mdpAskPromoteViaSidecar();
+      }
+    });
+    document.body.appendChild(fab);
+  }
+  function mdpAskOpenWholeFile() {
+    if (!ASK_ENABLED) return;
+    const content = document.getElementById('content');
+    if (!content) return;
+    const text = (content.textContent || '').trim();
+    if (!text) { mdpSelectToast('nothing to ask about'); return; }
+    state.askSelectionText = text;
+    state.askAnchorRect = null;
+    mdpAskShowInputUI();
+  }
+  function mdpAskOpenInput() {
+    if (!ASK_ENABLED || state.mode !== 'visual') return;
+    if (!mdpAskServerReachable()) { mdpSelectToast('ask requires mdp watch or mdp serve'); return; }
+    const snap = mdpAskSnapshotSelection();
+    if (!snap) { mdpSelectToast('no selection to ask about'); return; }
+    state.askSelectionText = snap.text;
+    state.askAnchorRect = snap.rect;
+    mdpAskShowInputUI();
+  }
+  function mdpAskShowInputUI() {
+    if (state.askEl) { state.askEl.remove(); state.askEl = null; }
+    if (state.askPillEl) { state.askPillEl.remove(); state.askPillEl = null; }
+    if (state.askInputEl) { state.askInputEl.remove(); state.askInputEl = null; }
+    mdpAskHideSelectionStar();
+    const wrap = document.createElement('div');
+    wrap.className = 'mdp-ask-input';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.spellcheck = false;
+    input.autocomplete = 'off';
+    input.placeholder = 'ask claude about the selection...';
+    input.value = state.askLastPrompt || '';
+    wrap.appendChild(input);
+    document.body.appendChild(wrap);
+    mdpAskPositionAnchored(wrap, state.askAnchorRect, { width: 360, height: 32, prefer: 'above' });
+    state.askInputEl = wrap;
+    input.focus();
+    input.select();
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        const v = input.value.trim();
+        if (v) mdpAskSubmit(v);
+      } else if (ev.key === 'Escape') {
+        ev.preventDefault();
+        mdpAskCloseAll();
+      }
+    });
+  }
+  function mdpAskShowPill() {
+    if (state.askInputEl) { state.askInputEl.remove(); state.askInputEl = null; }
+    const pill = document.createElement('div');
+    pill.className = 'mdp-ask-pill';
+    pill.textContent = 'thinking';
+    document.body.appendChild(pill);
+    mdpAskPositionAnchored(pill, state.askAnchorRect, { width: 120, height: 28, prefer: 'above' });
+    state.askPillEl = pill;
+  }
+  async function mdpAskSubmit(prompt) {
+    state.askLastPrompt = prompt;
+    mdpAskShowPill();
+    const abort = new AbortController();
+    state.askAbort = abort;
+    try {
+      const r = await fetch('/ask', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ selection: state.askSelectionText, prompt }),
+        signal: abort.signal
+      });
+      if (state.askAbort !== abort) return;
+      state.askAbort = null;
+      if (state.askPillEl) { state.askPillEl.remove(); state.askPillEl = null; }
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        mdpSelectToast(data && data.error ? data.error : 'ask failed (' + r.status + ')');
+        return;
+      }
+      mdpAskRenderCard(data.html || '');
+    } catch (err) {
+      if (err && err.name === 'AbortError') return;
+      if (state.askPillEl) { state.askPillEl.remove(); state.askPillEl = null; }
+      mdpSelectToast('ask failed: ' + err);
+    } finally {
+      if (state.askAbort === abort) state.askAbort = null;
+    }
+  }
+  function mdpAskRenderCard(html) {
+    if (state.askEl) { state.askEl.remove(); state.askEl = null; }
+    const card = document.createElement('div');
+    card.className = 'mdp-ask-card';
+    const close = document.createElement('button');
+    close.className = 'mdp-ask-card-close';
+    close.setAttribute('aria-label', 'Close');
+    close.textContent = String.fromCharCode(215);
+    close.addEventListener('click', () => mdpAskCloseAll());
+    const body = document.createElement('div');
+    body.className = 'mdp-ask-card-body markdown-body';
+    body.innerHTML = html;
+    card.appendChild(close);
+    card.appendChild(body);
+    document.body.appendChild(card);
+    mdpAskPositionCard(card, state.askAnchorRect);
+    state.askEl = card;
+  }
+  function mdpAskPositionAnchored(el, rect, opts) {
+    const w = opts.width, h = opts.height;
+    if (!rect) {
+      el.style.left = Math.max(8, (window.innerWidth - w) / 2) + 'px';
+      el.style.top = Math.max(8, (window.innerHeight - h) / 2) + 'px';
+      return;
+    }
+    let top = rect.top + window.scrollY - h - 6;
+    if (top < window.scrollY + 8) top = rect.bottom + window.scrollY + 6;
+    let left = rect.left + window.scrollX;
+    if (left + w > window.scrollX + window.innerWidth - 8) {
+      left = window.scrollX + window.innerWidth - w - 8;
+    }
+    if (left < window.scrollX + 8) left = window.scrollX + 8;
+    el.style.left = Math.round(left) + 'px';
+    el.style.top = Math.round(top) + 'px';
+  }
+  function mdpAskPositionCard(el, rect) {
+    const margin = 8;
+    const cardRect = el.getBoundingClientRect();
+    const w = cardRect.width, h = cardRect.height;
+    if (!rect) {
+      el.style.left = Math.max(margin, (window.innerWidth - w) / 2) + 'px';
+      el.style.top = Math.max(margin, (window.innerHeight - h) / 2) + 'px';
+      return;
+    }
+    // Try right of the selection, then left, then below.
+    const rightLeft = rect.right + margin;
+    const leftLeft = rect.left - w - margin;
+    let left;
+    if (rightLeft + w <= window.innerWidth - margin) {
+      left = rightLeft;
+    } else if (leftLeft >= margin) {
+      left = leftLeft;
+    } else {
+      left = Math.max(margin, (window.innerWidth - w) / 2);
+    }
+    let top = rect.top;
+    if (top + h > window.innerHeight - margin) top = Math.max(margin, window.innerHeight - h - margin);
+    el.style.left = Math.round(left + window.scrollX) + 'px';
+    el.style.top = Math.round(top + window.scrollY) + 'px';
+  }
+
   function mdpSelectOnKeydown(e) {
     if (isEditable(e.target) || blockedByOverlay()) return;
     if (state.mode === 'idle' || state.mode === 'visual') {
@@ -1080,10 +1319,28 @@ const selectScriptTemplate = `
         mdpSelectStartCenter();
         return;
       }
-      if (state.mode === 'idle') return;
+      if (state.mode === 'idle') {
+        // Idle-mode 'c' (select_ask) mirrors the AI icon: in static
+        // mode it promotes via the sidecar; on the watch server it
+        // opens the whole-file ask input directly.
+        if (ASK_ENABLED && isKey(e, 'select_ask')) {
+          if (mdpAskServerReachable()) {
+            e.preventDefault();
+            mdpAskOpenWholeFile();
+          } else if (mdpAskSidecarURL()) {
+            e.preventDefault();
+            mdpAskPromoteViaSidecar();
+          }
+        }
+        return;
+      }
     }
     if (e.key === 'Escape') {
       e.preventDefault();
+      if (state.askEl || state.askPillEl || state.askInputEl || state.askAbort) {
+        mdpAskCloseAll();
+        return;
+      }
       mdpSelectBail();
       return;
     }
@@ -1161,19 +1418,52 @@ const selectScriptTemplate = `
         } else {
           mdpSelectStartLineNumbers();
         }
+      } else if (ASK_ENABLED && isKey(e, 'select_ask')) {
+        e.preventDefault();
+        mdpAskOpenInput();
       }
     }
   }
   document.addEventListener('keydown', mdpSelectOnKeydown, true);
+  if (ASK_ENABLED) {
+    mdpAskInstallFab();
+    // The sidecar's /promote redirect appends ?open=ask so the user's
+    // single click on the static-mode AI icon both promotes AND opens
+    // the input on arrival. Query param (not a URL fragment) because
+    // some Chromium/WebKit builds strip the fragment on cross-origin
+    // 302 redirects.
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (mdpAskServerReachable() && params.get('open') === 'ask') {
+        params.delete('open');
+        const q = params.toString();
+        const url = window.location.pathname + (q ? '?' + q : '') + window.location.hash;
+        try { history.replaceState(null, '', url); } catch (_) {}
+        // Defer until after load + a paint frame so the browser's
+        // default body-focus on page load doesn't immediately steal
+        // focus back from the input we just opened.
+        const openAndFocus = () => {
+          mdpAskOpenWholeFile();
+          requestAnimationFrame(() => {
+            const i = document.querySelector('.mdp-ask-input input');
+            if (i && document.activeElement !== i) i.focus();
+          });
+        };
+        if (document.readyState === 'complete') setTimeout(openAndFocus, 0);
+        else window.addEventListener('load', () => setTimeout(openAndFocus, 0), { once: true });
+      }
+    } catch (_) {}
+  }
 })();
 `
 
-func buildSelectScript(keys KeyBindings, hop, visual bool) string {
+func buildSelectScript(keys KeyBindings, hop, visual, ask bool) string {
 	if !hop && !visual {
 		return ""
 	}
 	s := strings.ReplaceAll(selectScriptTemplate, "__HOP_ENABLED__", fmt.Sprintf("%t", hop))
 	s = strings.ReplaceAll(s, "__VISUAL_ENABLED__", fmt.Sprintf("%t", visual))
+	s = strings.ReplaceAll(s, "__ASK_ENABLED__", fmt.Sprintf("%t", ask && visual))
 	s = strings.ReplaceAll(s, "__SELECT_KEYS_JSON__", keysJSON(keys))
 	return s
 }
@@ -1591,12 +1881,12 @@ __WS_SCRIPT__
 // (only meaningful when at least one of fileTree/fuzzyFinder is on);
 // empty in WS mode (the page fetches /tree on demand).
 func BuildPage(body, theme string, wsPort int, extraCSS string, colemak bool, currentFile string, fileTree, fuzzyFinder bool, staticTreeJSON string) string {
-	return BuildPageWithKeys(body, theme, wsPort, extraCSS, colemak, currentFile, fileTree, fuzzyFinder, staticTreeJSON, false, false, nil)
+	return BuildPageWithKeys(body, theme, wsPort, extraCSS, colemak, currentFile, fileTree, fuzzyFinder, staticTreeJSON, false, false, false, nil)
 }
 
 // BuildPageWithKeys is BuildPage plus user key overrides. Unknown actions are
 // ignored; an empty key disables that action.
-func BuildPageWithKeys(body, theme string, wsPort int, extraCSS string, colemak bool, currentFile string, fileTree, fuzzyFinder bool, staticTreeJSON string, hop, visual bool, keyOverrides map[string]string) string {
+func BuildPageWithKeys(body, theme string, wsPort int, extraCSS string, colemak bool, currentFile string, fileTree, fuzzyFinder bool, staticTreeJSON string, hop, visual, ask bool, keyOverrides map[string]string) string {
 	// Make every <img> async + lazy so external image fetches
 	// (shields.io badges, remote screenshots, etc.) don't block
 	// first-contentful-paint. Measured ~500ms cold-start improvement
@@ -1640,7 +1930,7 @@ func BuildPageWithKeys(body, theme string, wsPort int, extraCSS string, colemak 
 	}
 
 	treeDOM, treeScript, finderDOM, finderScript, sharedNavScript := "", "", "", "", ""
-	selectScript := buildSelectScript(keys, hop, visual)
+	selectScript := buildSelectScript(keys, hop, visual, ask)
 	if fileTree {
 		treeDOM = `<div id="mdp-tree" hidden>` +
 			`<div class="mdp-tree-header"><span>Files</span>` +

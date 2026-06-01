@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -23,9 +24,12 @@ import (
 )
 
 const (
-	maxJSONBodyBytes = 64 << 10
-	wsWriteTimeout   = 2 * time.Second
-	scrollCoalesce   = 30 * time.Millisecond
+	maxJSONBodyBytes  = 64 << 10
+	wsWriteTimeout    = 2 * time.Second
+	scrollCoalesce    = 30 * time.Millisecond
+	maxAskOutputBytes = 256 << 10
+	defaultAskTimeout = 60 * time.Second
+	maxAskTimeout     = 600 * time.Second
 )
 
 type state struct {
@@ -48,10 +52,17 @@ type state struct {
 	fuzzyFinder     bool
 	hop             bool
 	visual          bool
-	keys            map[string]string
-	extraCSS        string
-	eventLog        io.Writer
-	wsClients       map[net.Conn]struct{}
+	ask             bool
+	askCommand      string
+	askTimeout      time.Duration
+	// runAsk is the seam tests substitute. Production wires a real
+	// exec.CommandContext via realRunAsk. It returns the stdout,
+	// stderr, and any exec/timeout error.
+	runAsk    func(ctx context.Context, argv []string, stdin []byte) (stdout, stderr []byte, err error)
+	keys      map[string]string
+	extraCSS  string
+	eventLog  io.Writer
+	wsClients map[net.Conn]struct{}
 
 	scrollMu      sync.Mutex
 	scrollPending int
@@ -251,6 +262,9 @@ func newHandler(s *state) http.Handler {
 	mux.HandleFunc("/scroll", guard(http.MethodPost, s.handleScroll))
 	mux.HandleFunc("/tree", guard(http.MethodGet, s.handleTree))
 	mux.HandleFunc("/_img/", guard(http.MethodGet, s.handleImg))
+	if s.ask {
+		mux.HandleFunc("/ask", guard(http.MethodPost, s.handleAsk))
+	}
 	return mux
 }
 
@@ -264,6 +278,7 @@ func (s *state) handleIndex(w http.ResponseWriter, r *http.Request) {
 	fuzzyFinder := s.fuzzyFinder
 	hop := s.hop
 	visual := s.visual
+	ask := s.ask
 	keys := s.keys
 	file := s.file
 	fileDir := s.fileDir
@@ -277,7 +292,7 @@ func (s *state) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return imgURLFor(abs, fileDir)
 	})
 
-	page := render.BuildPageWithKeys(body, theme, port, extraCSS, colemak, file, fileTree, fuzzyFinder, "", hop, visual, keys)
+	page := render.BuildPageWithKeys(body, theme, port, extraCSS, colemak, file, fileTree, fuzzyFinder, "", hop, visual, ask, keys)
 	encoded := []byte(page)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(len(encoded)))
@@ -460,6 +475,115 @@ func (s *state) handleScroll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "line": line})
 }
 
+// askPromptTemplate frames the selection + question for the LLM. The
+// selection goes between explicit fences so the model can tell what's
+// quoted vs what's the question; both arrive over stdin, never argv.
+const askPromptTemplate = `The user has selected the following text in a markdown document. Answer their question about it concisely. Output plain markdown.
+
+--- Selection start ---
+%s
+--- Selection end ---
+
+Question: %s
+`
+
+func (s *state) handleAsk(w http.ResponseWriter, r *http.Request) {
+	data, ok := readJSONBody(w, r)
+	if !ok {
+		return
+	}
+	selection, _ := data["selection"].(string)
+	prompt, _ := data["prompt"].(string)
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		writeError(w, http.StatusBadRequest, "prompt is required")
+		return
+	}
+
+	s.mu.Lock()
+	cmdStr := s.askCommand
+	timeout := s.askTimeout
+	runAsk := s.runAsk
+	s.mu.Unlock()
+	if cmdStr == "" {
+		cmdStr = "claude -p"
+	}
+	if timeout <= 0 {
+		timeout = defaultAskTimeout
+	}
+	argv := strings.Fields(cmdStr)
+	if len(argv) == 0 {
+		writeError(w, http.StatusInternalServerError, "ask_command is empty")
+		return
+	}
+	if runAsk == nil {
+		runAsk = realRunAsk
+	}
+
+	body := fmt.Sprintf(askPromptTemplate, selection, prompt)
+
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+	stdout, stderr, err := runAsk(ctx, argv, []byte(body))
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			writeError(w, http.StatusGatewayTimeout, fmt.Sprintf("ask timed out after %s", timeout))
+			return
+		}
+		var pathErr *exec.Error
+		if errors.As(err, &pathErr) {
+			writeError(w, http.StatusServiceUnavailable, "ask command not found: "+pathErr.Name)
+			return
+		}
+		snippet := strings.TrimSpace(string(stderr))
+		if len(snippet) > 500 {
+			snippet = snippet[:500]
+		}
+		if snippet == "" {
+			snippet = err.Error()
+		}
+		writeError(w, http.StatusBadGateway, "ask command failed: "+snippet)
+		return
+	}
+	html := render.RenderBytes(stdout)
+	writeJSON(w, map[string]any{"ok": true, "html": html})
+}
+
+// realRunAsk is the production runAsk: spawn argv with the prompt on
+// stdin, return stdout + stderr capped at maxAskOutputBytes each.
+func realRunAsk(ctx context.Context, argv []string, stdin []byte) ([]byte, []byte, error) {
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Stdin = bytes.NewReader(stdin)
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &cappedWriter{buf: &outBuf, cap: maxAskOutputBytes}
+	cmd.Stderr = &cappedWriter{buf: &errBuf, cap: maxAskOutputBytes}
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		return outBuf.Bytes(), errBuf.Bytes(), context.DeadlineExceeded
+	}
+	return outBuf.Bytes(), errBuf.Bytes(), err
+}
+
+// cappedWriter caps total bytes written into buf. Excess writes are
+// silently discarded so a runaway subprocess can't OOM the server.
+type cappedWriter struct {
+	buf *bytes.Buffer
+	cap int
+}
+
+func (c *cappedWriter) Write(p []byte) (int, error) {
+	rem := c.cap - c.buf.Len()
+	if rem <= 0 {
+		return len(p), nil
+	}
+	if len(p) > rem {
+		c.buf.Write(p[:rem])
+		return len(p), nil
+	}
+	c.buf.Write(p)
+	return len(p), nil
+}
+
 func (s *state) handleWS(w http.ResponseWriter, r *http.Request) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
@@ -603,19 +727,27 @@ func readStdin(s *state, stdin io.Reader, quit func()) {
 // required when Port is 0 (kernel-assigned). EventLog defaults to
 // os.Stdout when nil so the navigate-line stdout contract is preserved.
 type Options struct {
-	File        string
-	Port        int
-	Theme       string
-	Colemak     bool
-	FileTree    bool
-	FuzzyFinder bool
-	Hop         bool
-	Visual      bool
-	Keys        map[string]string
-	Watch       bool
-	ExtraCSS    string
-	EventLog    io.Writer
-	OnListen    func(port int)
+	File          string
+	Port          int
+	Theme         string
+	Colemak       bool
+	FileTree      bool
+	FuzzyFinder   bool
+	Hop           bool
+	Visual        bool
+	Ask           bool
+	AskCommand    string
+	AskTimeoutSec int
+	Keys          map[string]string
+	Watch         bool
+	ExtraCSS      string
+	EventLog      io.Writer
+	OnListen      func(port int)
+	// Stdin overrides the default os.Stdin source for the render/scroll/quit
+	// JSON line protocol. Nil keeps the default. The sidecar uses this to
+	// pass a never-EOF reader so server lifetime isn't tied to the parent
+	// closing the config-passing pipe.
+	Stdin io.Reader
 }
 
 // serve leaks the stdin scanner goroutine on ctx-cancel when stdin is
@@ -691,8 +823,21 @@ func Run(opts Options) error {
 	s.fuzzyFinder = opts.FuzzyFinder
 	s.hop = opts.Hop
 	s.visual = opts.Visual
+	s.ask = opts.Ask
+	s.askCommand = opts.AskCommand
+	s.askTimeout = time.Duration(opts.AskTimeoutSec) * time.Second
+	if s.askTimeout <= 0 {
+		s.askTimeout = defaultAskTimeout
+	}
+	if s.askTimeout > maxAskTimeout {
+		s.askTimeout = maxAskTimeout
+	}
 	s.keys = opts.Keys
 	s.extraCSS = opts.ExtraCSS
 	s.eventLog = opts.EventLog
-	return serve(context.Background(), s, os.Stdin, func() { os.Exit(0) }, opts.Watch, opts.OnListen)
+	stdin := opts.Stdin
+	if stdin == nil {
+		stdin = os.Stdin
+	}
+	return serve(context.Background(), s, stdin, func() { os.Exit(0) }, opts.Watch, opts.OnListen)
 }

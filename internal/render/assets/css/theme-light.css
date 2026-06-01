@@ -14,4 +14,6 @@
   --color-alert-caution: #cf222e;
   --color-select-label-bg: #9a6700;
   --color-select-selection: rgba(255, 200, 0, 0.45);
+  --color-ask-card-bg: #ffffff;
+  --color-ask-card-border: #d0d7de;
 }
