@@ -190,6 +190,7 @@ document.addEventListener('keydown', (e) => {
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
   if (e.target && e.target.isContentEditable) return;
   if (window.mdpSelectIsActive) return;
+  if (window.mdpTocIsOpen) return;
   if (e.key === __TREE_TOGGLE__ && !e.shiftKey) {
     e.preventDefault();
     if (mdpTreeIsOpen) mdpTreeOpenActive(true);
