@@ -54,6 +54,7 @@ var (
 	gtkWindowSetDefSize                         func(window uintptr, w, h int32)
 	gtkContainerAdd                             func(container, widget uintptr)
 	gtkWidgetShowAll                            func(widget uintptr)
+	gtkWidgetDestroy                            func(widget uintptr)
 	gtkMain                                     func()
 	gtkMainQuit                                 func()
 	webkitWebViewNew                            func() uintptr
@@ -110,6 +111,7 @@ func dlopenAll() error {
 	purego.RegisterLibFunc(&gtkWindowSetDefSize, libgtk, "gtk_window_set_default_size")
 	purego.RegisterLibFunc(&gtkContainerAdd, libgtk, "gtk_container_add")
 	purego.RegisterLibFunc(&gtkWidgetShowAll, libgtk, "gtk_widget_show_all")
+	purego.RegisterLibFunc(&gtkWidgetDestroy, libgtk, "gtk_widget_destroy")
 	purego.RegisterLibFunc(&gtkMain, libgtk, "gtk_main")
 	purego.RegisterLibFunc(&gtkMainQuit, libgtk, "gtk_main_quit")
 	purego.RegisterLibFunc(&webkitWebViewNew, libwebkit, "webkit_web_view_new")
@@ -343,6 +345,14 @@ func Open(opts Options) error {
 		return 0
 	})
 	gSignalConnectData(window, "destroy", destroyCB, 0, 0, 0)
+
+	// WebKitWebView's "close" signal is what JS window.close() resolves
+	// to. Without this handler the keybind silently no-ops.
+	closeCB := purego.NewCallback(func(_ uintptr, _ uintptr) uintptr {
+		gtkWidgetDestroy(window)
+		return 0
+	})
+	gSignalConnectData(view, "close", closeCB, 0, 0, 0)
 
 	gtkMain()
 	return nil

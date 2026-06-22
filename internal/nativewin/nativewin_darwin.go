@@ -113,6 +113,9 @@ func Open(opts Options) error {
 	delegate := objc.ID(delegateClass).Send(objc.RegisterName("alloc")).Send(objc.RegisterName("init"))
 	delegate.Send(objc.RegisterName("retain"))
 	wnd.Send(objc.RegisterName("setDelegate:"), delegate)
+	// WKUIDelegate's webViewDidClose: is the AppKit side of JS
+	// window.close(). Without it the keybind silently no-ops.
+	view.Send(objc.RegisterName("setUIDelegate:"), delegate)
 	// KVO on WKWebView.title — the delegate's observeValueForKeyPath:
 	// hook mirrors it to the NSWindow. NSKeyValueObservingOptionNew = 1.
 	titleKey := objc.ID(objc.GetClass("NSString")).Send(objc.RegisterName("stringWithUTF8String:"), "title")
@@ -159,6 +162,10 @@ func registerWindowDelegate() (objc.Class, error) {
 					Cmd: objc.RegisterName("observeValueForKeyPath:ofObject:change:context:"),
 					Fn:  onObserveTitle,
 				},
+				{
+					Cmd: objc.RegisterName("webViewDidClose:"),
+					Fn:  onWebViewDidClose,
+				},
 			},
 		)
 	})
@@ -182,6 +189,20 @@ func onObserveTitle(_ objc.ID, _ objc.SEL, _ objc.ID, object objc.ID, _ objc.ID,
 		return
 	}
 	wnd.Send(objc.RegisterName("setTitle:"), title)
+}
+
+// onWebViewDidClose receives the WKWebView whose JS just called
+// window.close(). Closing the owning NSWindow then triggers
+// windowWillClose: which stops the run loop.
+func onWebViewDidClose(_ objc.ID, _ objc.SEL, webView objc.ID) {
+	if webView == 0 {
+		return
+	}
+	wnd := webView.Send(objc.RegisterName("window"))
+	if wnd == 0 {
+		return
+	}
+	wnd.Send(objc.RegisterName("close"))
 }
 
 // [NSApp stop:] only takes effect at the end of the current
