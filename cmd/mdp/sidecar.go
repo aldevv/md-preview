@@ -27,19 +27,22 @@ import (
 // file path so the parent can inject the URL synchronously without
 // waiting for the child to bind.
 type sidecarOptions struct {
-	File          string            `json:"file"`
-	Theme         string            `json:"theme"`
-	Port          int               `json:"port"`
-	Colemak       bool              `json:"colemak"`
-	FileTree      bool              `json:"file_tree"`
-	FuzzyFinder   bool              `json:"fuzzy_finder"`
-	Hop           bool              `json:"hop"`
-	Visual        bool              `json:"visual"`
-	Ask           bool              `json:"ask"`
-	AskCommand    string            `json:"ask_command"`
-	AskTimeoutSec int               `json:"ask_timeout_sec"`
-	Keys          map[string]string `json:"keys"`
-	ExtraCSS      string            `json:"extra_css"`
+	File            string            `json:"file"`
+	Theme           string            `json:"theme"`
+	Port            int               `json:"port"`
+	Colemak         bool              `json:"colemak"`
+	FileTree        bool              `json:"file_tree"`
+	FuzzyFinder     bool              `json:"fuzzy_finder"`
+	Hop             bool              `json:"hop"`
+	Visual          bool              `json:"visual"`
+	Ask             bool              `json:"ask"`
+	AskCommand      string            `json:"ask_command"`
+	AskTimeoutSec   int               `json:"ask_timeout_sec"`
+	AskSystemPrompt string            `json:"ask_system_prompt"`
+	AskCardWidth    int               `json:"ask_card_width"`
+	AskCardHeight   int               `json:"ask_card_height"`
+	Keys            map[string]string `json:"keys"`
+	ExtraCSS        string            `json:"extra_css"`
 }
 
 const (
@@ -125,6 +128,9 @@ func runSidecar(args []string, stderr io.Writer) int {
 			Ask:               opts.Ask,
 			AskCommand:        opts.AskCommand,
 			AskTimeoutSec:     opts.AskTimeoutSec,
+			AskSystemPrompt:   opts.AskSystemPrompt,
+			AskCardWidth:      opts.AskCardWidth,
+			AskCardHeight:     opts.AskCardHeight,
 			Keys:              opts.Keys,
 			ExtraCSS:          opts.ExtraCSS,
 			Watch:             true,
@@ -296,19 +302,22 @@ func startSidecar(rc resolved, env Environment, stderr io.Writer) string {
 	port := sidecarPortFor(rc.src)
 	url := fmt.Sprintf("http://127.0.0.1:%d", port)
 	opts := sidecarOptions{
-		File:          rc.src,
-		Theme:         rc.theme,
-		Port:          port,
-		Colemak:       rc.cfg.Colemak,
-		FileTree:      rc.cfg.FileTree,
-		FuzzyFinder:   rc.cfg.FuzzyFinder,
-		Hop:           rc.cfg.Hop,
-		Visual:        rc.cfg.Visual,
-		Ask:           rc.cfg.Ask,
-		AskCommand:    rc.cfg.AskCommand,
-		AskTimeoutSec: rc.cfg.AskTimeoutSec,
-		Keys:          rc.cfg.Keys,
-		ExtraCSS:      config.ExtraCSS(rc.cfg, stderr),
+		File:            rc.src,
+		Theme:           rc.theme,
+		Port:            port,
+		Colemak:         rc.cfg.Colemak,
+		FileTree:        rc.cfg.FileTree,
+		FuzzyFinder:     rc.cfg.FuzzyFinder,
+		Hop:             rc.cfg.Hop,
+		Visual:          rc.cfg.Visual,
+		Ask:             rc.cfg.Ask,
+		AskCommand:      rc.cfg.AskCommand,
+		AskTimeoutSec:   rc.cfg.AskTimeoutSec,
+		AskSystemPrompt: rc.cfg.AskSystemPrompt,
+		AskCardWidth:    rc.cfg.AskCardWidth,
+		AskCardHeight:   rc.cfg.AskCardHeight,
+		Keys:            rc.cfg.Keys,
+		ExtraCSS:        config.ExtraCSS(rc.cfg, stderr),
 	}
 	payload, err := json.Marshal(opts)
 	if err != nil {

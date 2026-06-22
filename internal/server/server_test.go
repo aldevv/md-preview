@@ -126,6 +126,56 @@ func TestHandler_Ask_StubReturnsRenderedMarkdown(t *testing.T) {
 	}
 }
 
+func TestHandler_Ask_PriorContextAndSystemPromptInStdin(t *testing.T) {
+	dir := t.TempDir()
+	file := writeMD(t, dir, "doc.md", "# Hello\n")
+	s := newTestState(t, file)
+	s.ask = true
+	s.askCommand = "fake-claude"
+	s.askTimeout = 5 * time.Second
+	s.askSystemPrompt = "You are a terse senior engineer."
+	var gotStdin []byte
+	s.runAsk = func(ctx context.Context, argv []string, stdin []byte) ([]byte, []byte, error) {
+		gotStdin = stdin
+		return []byte("# follow-up\n"), nil, nil
+	}
+	srv := httptest.NewServer(newHandler(s))
+	defer srv.Close()
+
+	body, _ := json.Marshal(map[string]string{
+		"selection":      "func main() {}",
+		"prompt":         "and what does it return?",
+		"prior_prompt":   "what does this do?",
+		"prior_response": "It's the program entry point.",
+	})
+	resp, err := http.Post(srv.URL+"/ask", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /ask: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var got map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&got)
+	if raw, _ := got["raw"].(string); raw != "# follow-up\n" {
+		t.Errorf("raw = %q, want raw markdown from the command", raw)
+	}
+	stdin := string(gotStdin)
+	for _, want := range []string{
+		"terse senior engineer",
+		"func main() {}",
+		"what does this do?",
+		"It's the program entry point.",
+		"This is a follow-up",
+		"and what does it return?",
+	} {
+		if !strings.Contains(stdin, want) {
+			t.Errorf("stdin missing %q\nstdin: %s", want, stdin)
+		}
+	}
+}
+
 func TestHandler_Ask_CommandError(t *testing.T) {
 	dir := t.TempDir()
 	file := writeMD(t, dir, "doc.md", "# Hello\n")

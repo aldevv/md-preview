@@ -16,6 +16,7 @@ import (
 	"sync"
 
 	"github.com/aldevv/md-preview/internal/osutil"
+	"github.com/aldevv/md-preview/internal/render/page"
 	"github.com/aldevv/md-preview/internal/render/pandoc"
 )
 
@@ -30,15 +31,17 @@ const StaticTreeMaxFiles = 200
 const StaticTreePandocBudget = 25
 
 type StaticTreeOptions struct {
-	Theme       string
-	ExtraCSS    string
-	Colemak     bool
-	FileTree    bool
-	FuzzyFinder bool
-	Hop         bool
-	Visual      bool
-	Ask         bool
-	Keys        map[string]string
+	Theme         string
+	ExtraCSS      string
+	Colemak       bool
+	FileTree      bool
+	FuzzyFinder   bool
+	Hop           bool
+	Visual        bool
+	Ask           bool
+	AskCardWidth  int
+	AskCardHeight int
+	Keys          map[string]string
 	// MaxFiles overrides StaticTreeMaxFiles when nonzero.
 	MaxFiles int
 	// PandocBudget overrides StaticTreePandocBudget when nonzero.
@@ -174,9 +177,24 @@ func RenderStaticTree(entry, tmpDir string, opts StaticTreeOptions) (string, err
 			}
 			return FileURL(resolved), true
 		})
-		page := BuildPageWithKeys(rewritten, opts.Theme, 0, opts.ExtraCSS, opts.Colemak, src, opts.FileTree, opts.FuzzyFinder, treeJSON, opts.Hop, opts.Visual, opts.Ask, opts.Keys)
-		page = InjectSidecarURL(page, opts.SidecarURL)
-		if err := writeStaticTmpFile(rendered[src], []byte(page)); err != nil {
+		out := page.BuildPage(page.PageOptions{
+			Body:           rewritten,
+			Theme:          opts.Theme,
+			ExtraCSS:       opts.ExtraCSS,
+			Colemak:        opts.Colemak,
+			CurrentFile:    src,
+			FileTree:       opts.FileTree,
+			FuzzyFinder:    opts.FuzzyFinder,
+			StaticTreeJSON: treeJSON,
+			Hop:            opts.Hop,
+			Visual:         opts.Visual,
+			Ask:            opts.Ask,
+			KeyOverrides:   opts.Keys,
+			AskCardWidth:   opts.AskCardWidth,
+			AskCardHeight:  opts.AskCardHeight,
+		})
+		out = InjectSidecarURL(out, opts.SidecarURL)
+		if err := writeStaticTmpFile(rendered[src], []byte(out)); err != nil {
 			return "", err
 		}
 	}

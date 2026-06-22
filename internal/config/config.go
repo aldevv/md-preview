@@ -20,22 +20,31 @@ import (
 // Config is the parsed TOML config. Fields use zero values / nil pointers to
 // distinguish "unset" from explicitly-set values where it matters.
 type Config struct {
-	Theme       string            `toml:"theme"`
-	FontSize    *float64          `toml:"font_size"`
-	CustomCSS   string            `toml:"custom_css"`
-	Browser     any               `toml:"browser"`
-	Edit        bool              `toml:"edit"`
-	Colemak     bool              `toml:"colemak"`
-	FileTree    bool              `toml:"file_tree"`
-	FuzzyFinder bool              `toml:"fuzzy_finder"`
-	Hop         bool              `toml:"hop"`
-	Visual      bool              `toml:"visual"`
-	Ask         bool              `toml:"ask"`
-	AskCommand  string            `toml:"ask_command"`
+	Theme       string   `toml:"theme"`
+	FontSize    *float64 `toml:"font_size"`
+	CustomCSS   string   `toml:"custom_css"`
+	Browser     any      `toml:"browser"`
+	Edit        bool     `toml:"edit"`
+	Colemak     bool     `toml:"colemak"`
+	FileTree    bool     `toml:"file_tree"`
+	FuzzyFinder bool     `toml:"fuzzy_finder"`
+	Hop         bool     `toml:"hop"`
+	Visual      bool     `toml:"visual"`
+	Ask         bool     `toml:"ask"`
+	AskCommand  string   `toml:"ask_command"`
 	// AskTimeoutSec caps the ask subprocess wall-clock. 0 means
 	// "use the built-in default" (60s). Negative or huge values
 	// are clamped at the server.
-	AskTimeoutSec int               `toml:"ask_timeout_sec"`
+	AskTimeoutSec int `toml:"ask_timeout_sec"`
+	// AskSystemPrompt is prepended to every ask body so users can
+	// supply a persona / domain instructions without rebuilding the
+	// rest of the prompt template. Empty = no prefix.
+	AskSystemPrompt string `toml:"ask_system_prompt"`
+	// AskCardWidth / AskCardHeight size the answer popup. Width is
+	// in CSS pixels, height in vh (1-100). 0 falls back to the
+	// in-code defaults (560 / 50).
+	AskCardWidth  int               `toml:"ask_card_width"`
+	AskCardHeight int               `toml:"ask_card_height"`
 	Keys          map[string]string `toml:"keys"`
 	// PreferRunningBrowser: when true (default) and the user hasn't
 	// pinned a browser, mdp skips the native window if a chromium-
@@ -95,6 +104,9 @@ const defaultConfigTemplate = `# md-preview config: uncomment any line to overri
 # ask              = true        # 'c' in visual mode (and the top-right star) sends the selection + a prompt to claude -p
 # ask_command      = "claude -p" # command to spawn; receives the constructed prompt on stdin
 # ask_timeout_sec  = 60          # hard cap on the spawned process (1-600)
+# ask_system_prompt = ""         # extra instructions prepended to every ask body (persona, tone, etc.)
+# ask_card_width   = 560         # answer popup max width in px
+# ask_card_height  = 50          # answer popup max height in vh (1-100)
 `
 
 // EnsureDefault writes a commented default config file to Path() when one
@@ -135,7 +147,7 @@ func Load() (Config, error) {
 // decode merges user overrides over this struct, so an absent key keeps
 // the default and an explicit `false` (or other zero value) wins.
 func defaults() Config {
-	return Config{FileTree: true, FuzzyFinder: true, Hop: true, Visual: true, Ask: true}
+	return Config{FileTree: true, FuzzyFinder: true, Hop: true, Visual: true, Ask: true, AskCardWidth: 560, AskCardHeight: 50}
 }
 
 // ExpandTilde replaces a leading "~/" with the user's home directory. Bare

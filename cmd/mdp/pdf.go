@@ -9,6 +9,7 @@ import (
 
 	"github.com/aldevv/md-preview/internal/config"
 	"github.com/aldevv/md-preview/internal/render"
+	"github.com/aldevv/md-preview/internal/render/page"
 	pdfpkg "github.com/aldevv/md-preview/internal/render/pdf"
 )
 
@@ -73,9 +74,15 @@ func runPDF(args []string, stdout, stderr io.Writer, env Environment) int {
 		// the body the user shouldn't get an empty PDF.
 		return 1
 	}
-	page := render.BuildPage(body, theme, 0, config.ExtraCSS(cfg, stderr), cfg.Colemak, src, false, false, "")
+	pageHTML := page.BuildPage(page.PageOptions{
+		Body:        body,
+		Theme:       theme,
+		ExtraCSS:    config.ExtraCSS(cfg, stderr),
+		Colemak:     cfg.Colemak,
+		CurrentFile: src,
+	})
 	tmpPath := tmpHTMLPath(env.TempDir(), src)
-	if err := writeTmpFile(tmpPath, []byte(page)); err != nil {
+	if err := writeTmpFile(tmpPath, []byte(pageHTML)); err != nil {
 		fmt.Fprintf(stderr, "mdp pdf: writing tmp html: %v\n", err)
 		return 1
 	}

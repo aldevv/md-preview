@@ -1,207 +1,28 @@
 package server
 
 import (
-	"bufio"
-	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/aldevv/md-preview/internal/render"
+	"github.com/aldevv/md-preview/internal/render/page"
 )
 
 const (
-	maxJSONBodyBytes  = 64 << 10
-	wsWriteTimeout    = 2 * time.Second
-	scrollCoalesce    = 30 * time.Millisecond
-	maxAskOutputBytes = 256 << 10
-	defaultAskTimeout = 60 * time.Second
-	maxAskTimeout     = 600 * time.Second
+	maxJSONBodyBytes = 64 << 10
+	wsWriteTimeout   = 2 * time.Second
+	scrollCoalesce   = 30 * time.Millisecond
 )
-
-type state struct {
-	mu sync.Mutex
-	// file, fileDir, fileDirResolved move together under mu; a stdin
-	// "render" into a sibling tree retargets all three so /_img/
-	// confinement tracks the active doc. fileDirResolved is the
-	// EvalSymlinks of fileDir so served trees that themselves traverse
-	// a symlink (macOS /var/folders, NixOS, encfs) accept their own
-	// legitimate images.
-	file            string
-	fileDir         string
-	fileDirResolved string
-	htmlCache       string
-	renderVersion   int
-	theme           string
-	port            int
-	colemak         bool
-	fileTree        bool
-	fuzzyFinder     bool
-	hop             bool
-	visual          bool
-	ask             bool
-	askCommand      string
-	askTimeout      time.Duration
-	// runAsk is the seam tests substitute. Production wires a real
-	// exec.CommandContext via realRunAsk. It returns the stdout,
-	// stderr, and any exec/timeout error.
-	runAsk    func(ctx context.Context, argv []string, stdin []byte) (stdout, stderr []byte, err error)
-	keys      map[string]string
-	extraCSS  string
-	eventLog  io.Writer
-	wsClients map[net.Conn]struct{}
-
-	scrollMu      sync.Mutex
-	scrollPending int
-	scrollHas     bool
-	scrollTimer   *time.Timer
-}
-
-func newState(file string, port int, theme string, colemak bool) *state {
-	abs, err := filepath.Abs(file)
-	if err != nil {
-		abs = file
-	}
-	dir := filepath.Dir(abs)
-	resolved, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		resolved = dir
-	}
-	return &state{
-		file:            abs,
-		fileDir:         dir,
-		fileDirResolved: resolved,
-		port:            port,
-		theme:           theme,
-		colemak:         colemak,
-		wsClients:       make(map[net.Conn]struct{}),
-	}
-}
-
-func (s *state) doRender() int {
-	s.mu.Lock()
-	fp := s.file
-	s.mu.Unlock()
-
-	body, _ := render.RenderBody(fp)
-
-	s.mu.Lock()
-	s.htmlCache = body
-	s.renderVersion++
-	v := s.renderVersion
-	s.mu.Unlock()
-	return v
-}
-
-// The "file" field on the reload payload carries the current document
-// path so the browser click handler keeps relative-href resolution in
-// sync after a navigation.
-func (s *state) renderAndBroadcast() int {
-	v := s.doRender()
-	s.mu.Lock()
-	file := s.file
-	s.mu.Unlock()
-	payload, _ := json.Marshal(map[string]any{"type": "reload", "version": v, "file": file})
-	s.broadcast(string(payload))
-	return v
-}
-
-// broadcastScroll coalesces scroll bursts into one frame per
-// scrollCoalesce window. nvim fires CursorMoved at ~60Hz; the older
-// pending line is dropped when a newer one arrives mid-window.
-func (s *state) broadcastScroll(line int) {
-	s.scrollMu.Lock()
-	s.scrollPending = line
-	s.scrollHas = true
-	if s.scrollTimer == nil {
-		s.scrollTimer = time.AfterFunc(scrollCoalesce, s.flushScroll)
-	}
-	s.scrollMu.Unlock()
-}
-
-func (s *state) flushScroll() {
-	s.scrollMu.Lock()
-	line := s.scrollPending
-	has := s.scrollHas
-	s.scrollHas = false
-	s.scrollTimer = nil
-	s.scrollMu.Unlock()
-	if !has {
-		return
-	}
-	payload, _ := json.Marshal(map[string]any{"type": "scroll", "line": line})
-	s.broadcast(string(payload))
-}
-
-func (s *state) addClient(c net.Conn) {
-	s.mu.Lock()
-	s.wsClients[c] = struct{}{}
-	s.mu.Unlock()
-}
-
-func (s *state) removeClient(c net.Conn) {
-	s.mu.Lock()
-	delete(s.wsClients, c)
-	s.mu.Unlock()
-}
-
-// broadcast fans writes out per-client so a stalled tab only blocks its
-// own goroutine for wsWriteTimeout. Returns synchronously so callers
-// see ordering across successive frames (e.g. scroll then reload).
-func (s *state) broadcast(msg string) {
-	frame := wsEncode(msg)
-	s.mu.Lock()
-	clients := make([]net.Conn, 0, len(s.wsClients))
-	for c := range s.wsClients {
-		clients = append(clients, c)
-	}
-	s.mu.Unlock()
-
-	if len(clients) == 0 {
-		return
-	}
-
-	deadCh := make(chan net.Conn, len(clients))
-	var wg sync.WaitGroup
-	for _, c := range clients {
-		wg.Add(1)
-		go func(c net.Conn) {
-			defer wg.Done()
-			_ = c.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
-			if _, err := c.Write(frame); err != nil {
-				deadCh <- c
-			}
-		}(c)
-	}
-	wg.Wait()
-	close(deadCh)
-
-	var dead []net.Conn
-	for c := range deadCh {
-		dead = append(dead, c)
-	}
-	if len(dead) > 0 {
-		s.mu.Lock()
-		for _, c := range dead {
-			delete(s.wsClients, c)
-			_ = c.Close()
-		}
-		s.mu.Unlock()
-	}
-}
 
 var loopbackHosts = map[string]struct{}{
 	"localhost": {}, "127.0.0.1": {}, "::1": {}, "[::1]": {},
@@ -280,6 +101,8 @@ func (s *state) handleIndex(w http.ResponseWriter, r *http.Request) {
 	hop := s.hop
 	visual := s.visual
 	ask := s.ask
+	askCardWidth := s.askCardWidth
+	askCardHeight := s.askCardHeight
 	keys := s.keys
 	file := s.file
 	fileDir := s.fileDir
@@ -293,8 +116,23 @@ func (s *state) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return imgURLFor(abs, fileDir)
 	})
 
-	page := render.BuildPageWithKeys(body, theme, port, extraCSS, colemak, file, fileTree, fuzzyFinder, "", hop, visual, ask, keys)
-	encoded := []byte(page)
+	pageHTML := page.BuildPage(page.PageOptions{
+		Body:          body,
+		Theme:         theme,
+		WSPort:        port,
+		ExtraCSS:      extraCSS,
+		Colemak:       colemak,
+		CurrentFile:   file,
+		FileTree:      fileTree,
+		FuzzyFinder:   fuzzyFinder,
+		Hop:           hop,
+		Visual:        visual,
+		Ask:           ask,
+		KeyOverrides:  keys,
+		AskCardWidth:  askCardWidth,
+		AskCardHeight: askCardHeight,
+	})
+	encoded := []byte(pageHTML)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(len(encoded)))
 	w.WriteHeader(http.StatusOK)
@@ -476,139 +314,6 @@ func (s *state) handleScroll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "line": line})
 }
 
-// askPromptTemplate frames the selection + question for the LLM. The
-// selection goes between explicit fences so the model can tell what's
-// quoted vs what's the question; both arrive over stdin, never argv.
-const askPromptTemplate = `The user has selected the following text in a markdown document. Answer their question about it concisely. Output plain markdown.
-
---- Selection start ---
-%s
---- Selection end ---
-
-Question: %s
-`
-
-func (s *state) handleAsk(w http.ResponseWriter, r *http.Request) {
-	data, ok := readJSONBody(w, r)
-	if !ok {
-		return
-	}
-	selection, _ := data["selection"].(string)
-	prompt, _ := data["prompt"].(string)
-	prompt = strings.TrimSpace(prompt)
-	if prompt == "" {
-		writeError(w, http.StatusBadRequest, "prompt is required")
-		return
-	}
-
-	s.mu.Lock()
-	cmdStr := s.askCommand
-	timeout := s.askTimeout
-	runAsk := s.runAsk
-	s.mu.Unlock()
-	if cmdStr == "" {
-		cmdStr = "claude -p"
-	}
-	if timeout <= 0 {
-		timeout = defaultAskTimeout
-	}
-	argv := strings.Fields(cmdStr)
-	if len(argv) == 0 {
-		writeError(w, http.StatusInternalServerError, "ask_command is empty")
-		return
-	}
-	if runAsk == nil {
-		runAsk = realRunAsk
-	}
-
-	body := fmt.Sprintf(askPromptTemplate, selection, prompt)
-
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
-	defer cancel()
-	stdout, stderr, err := runAsk(ctx, argv, []byte(body))
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			writeError(w, http.StatusGatewayTimeout, fmt.Sprintf("ask timed out after %s", timeout))
-			return
-		}
-		var pathErr *exec.Error
-		if errors.As(err, &pathErr) {
-			writeError(w, http.StatusServiceUnavailable, "ask command not found: "+pathErr.Name)
-			return
-		}
-		snippet := strings.TrimSpace(string(stderr))
-		if len(snippet) > 500 {
-			snippet = snippet[:500]
-		}
-		if snippet == "" {
-			snippet = err.Error()
-		}
-		writeError(w, http.StatusBadGateway, "ask command failed: "+snippet)
-		return
-	}
-	html := render.RenderBytes(stdout)
-	s.mu.Lock()
-	curFile := s.file
-	s.mu.Unlock()
-	appendHistoryAsync(curFile, prompt, html)
-	writeJSON(w, map[string]any{"ok": true, "html": html})
-}
-
-// handleAskHistory returns the per-file ask history newest-first.
-// File is the server's current document (s.file), not a client-
-// supplied path, so a tab from a stale render can't read another
-// file's history. Loaded lazily from disk on each call so startup
-// isn't paying for it.
-func (s *state) handleAskHistory(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	file := s.file
-	s.mu.Unlock()
-	entries, err := readHistoryFor(file, 50)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "history read failed")
-		return
-	}
-	if entries == nil {
-		entries = []historyEntry{}
-	}
-	writeJSON(w, map[string]any{"entries": entries})
-}
-
-// realRunAsk is the production runAsk: spawn argv with the prompt on
-// stdin, return stdout + stderr capped at maxAskOutputBytes each.
-func realRunAsk(ctx context.Context, argv []string, stdin []byte) ([]byte, []byte, error) {
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	cmd.Stdin = bytes.NewReader(stdin)
-	var outBuf, errBuf bytes.Buffer
-	cmd.Stdout = &cappedWriter{buf: &outBuf, cap: maxAskOutputBytes}
-	cmd.Stderr = &cappedWriter{buf: &errBuf, cap: maxAskOutputBytes}
-	err := cmd.Run()
-	if ctx.Err() == context.DeadlineExceeded {
-		return outBuf.Bytes(), errBuf.Bytes(), context.DeadlineExceeded
-	}
-	return outBuf.Bytes(), errBuf.Bytes(), err
-}
-
-// cappedWriter caps total bytes written into buf. Excess writes are
-// silently discarded so a runaway subprocess can't OOM the server.
-type cappedWriter struct {
-	buf *bytes.Buffer
-	cap int
-}
-
-func (c *cappedWriter) Write(p []byte) (int, error) {
-	rem := c.cap - c.buf.Len()
-	if rem <= 0 {
-		return len(p), nil
-	}
-	if len(p) > rem {
-		c.buf.Write(p[:rem])
-		return len(p), nil
-	}
-	c.buf.Write(p)
-	return len(p), nil
-}
-
 func (s *state) handleWS(w http.ResponseWriter, r *http.Request) {
 	hj, ok := w.(http.Hijacker)
 	if !ok {
@@ -701,219 +406,3 @@ func writeJSON(w http.ResponseWriter, data any) {
 // readStdin trusts the "render" file path because it comes from the
 // local nvim plugin over a private pipe, not over HTTP; the /render
 // path-confinement restriction intentionally does NOT apply here.
-func readStdin(s *state, stdin io.Reader, quit func()) {
-	scanner := bufio.NewScanner(stdin)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-		var msg map[string]any
-		if err := json.Unmarshal(line, &msg); err != nil {
-			continue
-		}
-		mtype, _ := msg["type"].(string)
-		switch mtype {
-		case "quit":
-			quit()
-			return
-		case "render":
-			var navigateTo string
-			if fp, _ := msg["file"].(string); fp != "" {
-				if abs, err := filepath.Abs(fp); err == nil {
-					dir := filepath.Dir(abs)
-					resolved, errR := filepath.EvalSymlinks(dir)
-					if errR != nil {
-						resolved = dir
-					}
-					s.mu.Lock()
-					if s.file != abs {
-						navigateTo = abs
-					}
-					s.file = abs
-					s.fileDir = dir
-					s.fileDirResolved = resolved
-					s.mu.Unlock()
-				}
-			}
-			if navigateTo != "" {
-				s.emitNavigate(navigateTo)
-			}
-			s.renderAndBroadcast()
-		case "scroll":
-			s.broadcastScroll(jsonInt(msg["line"]))
-		}
-	}
-}
-
-// Options configures Run. Watch enables the mtime-polling file watcher.
-// OnListen is invoked with the bound port once net.Listen returns,
-// required when Port is 0 (kernel-assigned). EventLog defaults to
-// os.Stdout when nil so the navigate-line stdout contract is preserved.
-type Options struct {
-	File          string
-	Port          int
-	Theme         string
-	Colemak       bool
-	FileTree      bool
-	FuzzyFinder   bool
-	Hop           bool
-	Visual        bool
-	Ask           bool
-	AskCommand    string
-	AskTimeoutSec int
-	Keys          map[string]string
-	Watch         bool
-	ExtraCSS      string
-	EventLog      io.Writer
-	OnListen      func(port int)
-	// Stdin overrides the default os.Stdin source for the render/scroll/quit
-	// JSON line protocol. Nil keeps the default. The sidecar uses this to
-	// pass a never-EOF reader so server lifetime isn't tied to the parent
-	// closing the config-passing pipe.
-	Stdin io.Reader
-	// ClientIdleTimeout, when > 0, exits the server (via quit) after the
-	// last WS client has been disconnected for this duration. Only kicks
-	// in once at least one client has connected; before then the server
-	// stays up waiting (sidecar's wall-clock idle handles "never opened"
-	// case). Used by the sidecar to clean up when the user closes the
-	// preview window.
-	ClientIdleTimeout time.Duration
-}
-
-// serve leaks the stdin scanner goroutine on ctx-cancel when stdin is
-// os.Stdin: bufio.Scanner can't be cancelled, and the scanner unblocks
-// only when the process exits. Production exits via os.Exit before this
-// matters; tests pass bounded readers that EOF naturally.
-// monitorClientIdle calls quit when the server has had at least one
-// WS client connect and is now back to zero for the full timeout
-// window. Polling once at ~timeout/4 keeps the check cheap and the
-// detection latency bounded.
-func monitorClientIdle(ctx context.Context, s *state, timeout time.Duration, quit func()) {
-	interval := timeout / 4
-	if interval < time.Second {
-		interval = time.Second
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	var firstSeen bool
-	var idleSince time.Time
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.mu.Lock()
-			n := len(s.wsClients)
-			s.mu.Unlock()
-			if n > 0 {
-				firstSeen = true
-				idleSince = time.Time{}
-				continue
-			}
-			if !firstSeen {
-				continue
-			}
-			if idleSince.IsZero() {
-				idleSince = time.Now()
-				continue
-			}
-			if time.Since(idleSince) >= timeout {
-				quit()
-				return
-			}
-		}
-	}
-}
-
-func serve(ctx context.Context, s *state, stdin io.Reader, quit func(), watch bool, onListen func(int), clientIdleTimeout time.Duration) error {
-	s.doRender()
-
-	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return err
-	}
-
-	// When Port==0 the kernel picks; surface it so the rendered page
-	// embeds the actual WS port.
-	actualPort := ln.Addr().(*net.TCPAddr).Port
-	s.mu.Lock()
-	s.port = actualPort
-	s.mu.Unlock()
-	if onListen != nil {
-		onListen(actualPort)
-	}
-
-	srv := &http.Server{
-		Handler:           newHandler(s),
-		ReadHeaderTimeout: 10 * time.Second,
-		ErrorLog:          log.New(io.Discard, "", 0),
-	}
-
-	fmt.Fprintf(os.Stdout, "[md-preview] Serving on http://localhost:%d/\n", actualPort)
-
-	watchCtx, watchCancel := context.WithCancel(ctx)
-	defer watchCancel()
-	if watch {
-		go watchFile(watchCtx, s)
-	}
-	if clientIdleTimeout > 0 {
-		go monitorClientIdle(watchCtx, s, clientIdleTimeout, quit)
-	}
-
-	stdinDone := make(chan struct{})
-	go func() {
-		readStdin(s, stdin, quit)
-		close(stdinDone)
-	}()
-
-	srvErr := make(chan error, 1)
-	go func() {
-		err := srv.Serve(ln)
-		if errors.Is(err, http.ErrServerClosed) {
-			err = nil
-		}
-		srvErr <- err
-	}()
-
-	select {
-	case <-ctx.Done():
-		_ = srv.Close()
-		return <-srvErr
-	case <-stdinDone:
-		_ = srv.Close()
-		return <-srvErr
-	case err := <-srvErr:
-		return err
-	}
-}
-
-// Run blocks until stdin closes or {"type":"quit"} arrives (which calls
-// os.Exit(0)). The "[md-preview] Serving on http://localhost:<port>/"
-// startup line is parsed by external tooling and must stay on stdout.
-func Run(opts Options) error {
-	s := newState(opts.File, opts.Port, opts.Theme, opts.Colemak)
-	s.fileTree = opts.FileTree
-	s.fuzzyFinder = opts.FuzzyFinder
-	s.hop = opts.Hop
-	s.visual = opts.Visual
-	s.ask = opts.Ask
-	s.askCommand = opts.AskCommand
-	s.askTimeout = time.Duration(opts.AskTimeoutSec) * time.Second
-	if s.askTimeout <= 0 {
-		s.askTimeout = defaultAskTimeout
-	}
-	if s.askTimeout > maxAskTimeout {
-		s.askTimeout = maxAskTimeout
-	}
-	s.keys = opts.Keys
-	s.extraCSS = opts.ExtraCSS
-	s.eventLog = opts.EventLog
-	stdin := opts.Stdin
-	if stdin == nil {
-		stdin = os.Stdin
-	}
-	return serve(context.Background(), s, stdin, func() { os.Exit(0) }, opts.Watch, opts.OnListen, opts.ClientIdleTimeout)
-}

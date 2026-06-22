@@ -29,6 +29,7 @@ import (
 	"github.com/aldevv/md-preview/internal/nativewin"
 	"github.com/aldevv/md-preview/internal/osutil"
 	"github.com/aldevv/md-preview/internal/render"
+	"github.com/aldevv/md-preview/internal/render/page"
 	"github.com/aldevv/md-preview/internal/render/pandoc"
 	"github.com/aldevv/md-preview/internal/server"
 )
@@ -635,16 +636,18 @@ embed{display:block;width:100vw;height:100vh;border:0}</style>
 
 func renderEntryAsStaticTree(rc resolved, env Environment, stderr io.Writer) (string, bool) {
 	opts := render.StaticTreeOptions{
-		Theme:       rc.theme,
-		ExtraCSS:    config.ExtraCSS(rc.cfg, stderr),
-		Colemak:     rc.cfg.Colemak,
-		FileTree:    rc.cfg.FileTree,
-		FuzzyFinder: rc.cfg.FuzzyFinder,
-		Hop:         rc.cfg.Hop,
-		Visual:      rc.cfg.Visual,
-		Ask:         rc.cfg.Ask,
-		Keys:        rc.cfg.Keys,
-		SidecarURL:  rc.sidecarURL,
+		Theme:         rc.theme,
+		ExtraCSS:      config.ExtraCSS(rc.cfg, stderr),
+		Colemak:       rc.cfg.Colemak,
+		FileTree:      rc.cfg.FileTree,
+		FuzzyFinder:   rc.cfg.FuzzyFinder,
+		Hop:           rc.cfg.Hop,
+		Visual:        rc.cfg.Visual,
+		Ask:           rc.cfg.Ask,
+		AskCardWidth:  rc.cfg.AskCardWidth,
+		AskCardHeight: rc.cfg.AskCardHeight,
+		Keys:          rc.cfg.Keys,
+		SidecarURL:    rc.sidecarURL,
 	}
 	entryHTML, err := render.RenderStaticTree(rc.src, env.TempDir(), opts)
 	if err != nil {
@@ -668,10 +671,22 @@ func renderEntryAsSingleFile(rc resolved, env Environment, stderr io.Writer) (st
 		}
 		return render.FileURL(abs), true
 	})
-	page := render.BuildPageWithKeys(body, rc.theme, 0, config.ExtraCSS(rc.cfg, stderr), rc.cfg.Colemak, rc.src, false, false, "", rc.cfg.Hop, rc.cfg.Visual, rc.cfg.Ask, rc.cfg.Keys)
-	page = render.InjectSidecarURL(page, rc.sidecarURL)
+	pageHTML := page.BuildPage(page.PageOptions{
+		Body:          body,
+		Theme:         rc.theme,
+		ExtraCSS:      config.ExtraCSS(rc.cfg, stderr),
+		Colemak:       rc.cfg.Colemak,
+		CurrentFile:   rc.src,
+		Hop:           rc.cfg.Hop,
+		Visual:        rc.cfg.Visual,
+		Ask:           rc.cfg.Ask,
+		KeyOverrides:  rc.cfg.Keys,
+		AskCardWidth:  rc.cfg.AskCardWidth,
+		AskCardHeight: rc.cfg.AskCardHeight,
+	})
+	pageHTML = render.InjectSidecarURL(pageHTML, rc.sidecarURL)
 	tmpPath := tmpHTMLPath(env.TempDir(), rc.src)
-	if err := writeTmpFile(tmpPath, []byte(page)); err != nil {
+	if err := writeTmpFile(tmpPath, []byte(pageHTML)); err != nil {
 		fmt.Fprintf(stderr, "mdp: writing tmp: %v\n", err)
 		return "", false
 	}
@@ -806,20 +821,23 @@ func runWatchSubcommand(args []string, stdout, stderr io.Writer, env Environment
 	}
 
 	opts := server.Options{
-		File:          rc.src,
-		Port:          0,
-		Theme:         rc.theme,
-		Colemak:       rc.cfg.Colemak,
-		FileTree:      rc.cfg.FileTree,
-		FuzzyFinder:   rc.cfg.FuzzyFinder,
-		Hop:           rc.cfg.Hop,
-		Visual:        rc.cfg.Visual,
-		Ask:           rc.cfg.Ask,
-		AskCommand:    rc.cfg.AskCommand,
-		AskTimeoutSec: rc.cfg.AskTimeoutSec,
-		Keys:          rc.cfg.Keys,
-		Watch:         true,
-		ExtraCSS:      config.ExtraCSS(rc.cfg, stderr),
+		File:            rc.src,
+		Port:            0,
+		Theme:           rc.theme,
+		Colemak:         rc.cfg.Colemak,
+		FileTree:        rc.cfg.FileTree,
+		FuzzyFinder:     rc.cfg.FuzzyFinder,
+		Hop:             rc.cfg.Hop,
+		Visual:          rc.cfg.Visual,
+		Ask:             rc.cfg.Ask,
+		AskCommand:      rc.cfg.AskCommand,
+		AskTimeoutSec:   rc.cfg.AskTimeoutSec,
+		AskSystemPrompt: rc.cfg.AskSystemPrompt,
+		AskCardWidth:    rc.cfg.AskCardWidth,
+		AskCardHeight:   rc.cfg.AskCardHeight,
+		Keys:            rc.cfg.Keys,
+		Watch:           true,
+		ExtraCSS:        config.ExtraCSS(rc.cfg, stderr),
 	}
 
 	if wantNative() && env.OpenWindow != nil {
@@ -921,19 +939,22 @@ func runServe(args []string, stdin io.Reader, stderr io.Writer, env Environment)
 		}
 	}
 	opts := server.Options{
-		File:          args[0],
-		Port:          port,
-		Theme:         args[2],
-		Colemak:       colemak,
-		FileTree:      cfg.FileTree,
-		FuzzyFinder:   cfg.FuzzyFinder,
-		Hop:           cfg.Hop,
-		Visual:        cfg.Visual,
-		Ask:           cfg.Ask,
-		AskCommand:    cfg.AskCommand,
-		AskTimeoutSec: cfg.AskTimeoutSec,
-		Keys:          cfg.Keys,
-		ExtraCSS:      config.ExtraCSS(cfg, stderr),
+		File:            args[0],
+		Port:            port,
+		Theme:           args[2],
+		Colemak:         colemak,
+		FileTree:        cfg.FileTree,
+		FuzzyFinder:     cfg.FuzzyFinder,
+		Hop:             cfg.Hop,
+		Visual:          cfg.Visual,
+		Ask:             cfg.Ask,
+		AskCommand:      cfg.AskCommand,
+		AskTimeoutSec:   cfg.AskTimeoutSec,
+		AskSystemPrompt: cfg.AskSystemPrompt,
+		AskCardWidth:    cfg.AskCardWidth,
+		AskCardHeight:   cfg.AskCardHeight,
+		Keys:            cfg.Keys,
+		ExtraCSS:        config.ExtraCSS(cfg, stderr),
 	}
 	// Direct-shell invocations (stdin is a TTY) get the native window
 	// like plain mdp/watch. The nvim plugin spawns mdp serve with a
