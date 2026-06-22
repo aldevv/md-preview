@@ -15,12 +15,47 @@ const vimKeysScriptTemplate = `
 (() => {
     const STEP = 60;
     const KEYS = __KEYS_JSON__;
+    const STATIC_RELOAD = __RELOAD_STATIC__;
+    // Multi-char bindings that aren't named-keys (Tab, Enter, ArrowUp, ...)
+    // are treated as 2+ keypress sequences. SEQ_TIMEOUT_MS bounds how long
+    // we wait after a prefix key before firing its single-key action.
+    const SPECIAL_KEYS = new Set(['Tab','Enter','Escape','Backspace','Delete','Home','End','PageUp','PageDown','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','F1','F2','F3','F4','F5','F6','F7','F8','F9','F10','F11','F12']);
+    function isSequenceBinding(v) {
+        if (!v || v.length < 2) return false;
+        if (v.startsWith('Ctrl+') || v.startsWith('Meta+') || v.startsWith('Alt+') || v.startsWith('Shift+')) return false;
+        return !SPECIAL_KEYS.has(v);
+    }
+    const SEQ_MAP = {};
+    const SEQ_PREFIXES = new Set();
+    const SEQ_TIMEOUT_MS = 400;
+    let pendingPrefix = null;
+    let pendingTimer = null;
+    function clearPending() {
+        if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
+        pendingPrefix = null;
+    }
     function key(action) { return KEYS[action] || ''; }
     function isKey(e, action) { return key(action) && e.key === key(action); }
+    const PAGE_ACTIONS = ['down','up','left','right','half_down','half_up','full_down','full_up','top','bottom','history_back','history_forward','zoom_in','zoom_out','zoom_reset','close','toc_open','reload'];
+    for (const action of PAGE_ACTIONS) {
+        const v = KEYS[action];
+        if (isSequenceBinding(v)) {
+            SEQ_MAP[v] = action;
+            SEQ_PREFIXES.add(v[0]);
+        }
+    }
+    function actionForKey(k) {
+        if (!k) return null;
+        for (const a of PAGE_ACTIONS) if (KEYS[a] === k) return a;
+        return null;
+    }
     function isEditable(el) {
         if (!el) return false;
         const tag = el.tagName;
         return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+    }
+    function overlayBlock() {
+        return !!(window.mdpTreeIsOpen || window.mdpTocIsOpen || window.mdpFinderIsOpen || window.mdpSelectIsActive || window.mdpSearchIsOpen);
     }
     const ZOOM_MIN = 0.3, ZOOM_MAX = 3.0, ZOOM_STEP = 0.1;
     function mdpReadZoom() {
@@ -63,53 +98,94 @@ const vimKeysScriptTemplate = `
         mdpHoldDir = 0;
         if (mdpHoldRAF) { cancelAnimationFrame(mdpHoldRAF); mdpHoldRAF = null; }
     }
-    document.addEventListener('keydown', (e) => {
-        if (e.ctrlKey || e.metaKey || e.altKey) return;
-        if (isEditable(e.target)) return;
-        if (window.mdpTreeIsOpen || window.mdpFinderIsOpen || window.mdpSelectIsActive || window.mdpSearchIsOpen) return;
+    // dispatchSingle runs the single-key body for an action. e may be
+    // null when the action fires retroactively (sequence-timeout flush);
+    // hold-scroll keys gracefully degrade to their one-shot smooth scroll.
+    function dispatchSingle(action, e) {
         const h = window.innerHeight;
-        if (isKey(e, 'down')) {
-            window.scrollBy({ top:  STEP, behavior: 'auto' });
-        } else if (isKey(e, 'up')) {
-            window.scrollBy({ top: -STEP, behavior: 'auto' });
-        } else if (isKey(e, 'left')) {
-            window.scrollBy({ left: -STEP, behavior: 'auto' });
-        } else if (isKey(e, 'right')) {
-            window.scrollBy({ left:  STEP, behavior: 'auto' });
-        } else if (isKey(e, 'half_down')) {
-            if (e.repeat) mdpStartHold(1, mdpHoldHalfPx);
-            else window.scrollBy({ top:  h / 2, behavior: 'smooth' });
-        } else if (isKey(e, 'half_up')) {
-            if (e.repeat) mdpStartHold(-1, mdpHoldHalfPx);
-            else window.scrollBy({ top: -h / 2, behavior: 'smooth' });
-        } else if (isKey(e, 'full_down')) {
-            if (e.repeat) mdpStartHold(1, mdpHoldFullPx);
-            else window.scrollBy({ top:  h, behavior: 'smooth' });
-        } else if (isKey(e, 'full_up')) {
-            if (e.repeat) mdpStartHold(-1, mdpHoldFullPx);
-            else window.scrollBy({ top: -h, behavior: 'smooth' });
-        } else if (isKey(e, 'top')) {
-            window.scrollTo({ top: 0, behavior: 'smooth' });
-        } else if (isKey(e, 'bottom')) {
-            window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' });
-        } else if (isKey(e, 'history_back')) {
-            if (typeof mdpGoBack === 'function') mdpGoBack(); else return;
-        } else if (isKey(e, 'history_forward')) {
-            if (typeof mdpGoForward === 'function') mdpGoForward(); else return;
-        } else if (isKey(e, 'zoom_in')) {
-            mdpApplyZoom(mdpReadZoom() + ZOOM_STEP);
-        } else if (isKey(e, 'zoom_out')) {
-            mdpApplyZoom(mdpReadZoom() - ZOOM_STEP);
-        } else if (isKey(e, 'zoom_reset')) {
-            mdpApplyZoom(1);
-        } else if (isKey(e, 'close')) {
-            window.close();
-        } else if (__RELOAD_CONDITION__) {
-            location.reload();
-        } else {
+        switch (action) {
+            case 'down':  window.scrollBy({ top:  STEP, behavior: 'auto' }); return true;
+            case 'up':    window.scrollBy({ top: -STEP, behavior: 'auto' }); return true;
+            case 'left':  window.scrollBy({ left: -STEP, behavior: 'auto' }); return true;
+            case 'right': window.scrollBy({ left:  STEP, behavior: 'auto' }); return true;
+            case 'half_down':
+                if (e && e.repeat) mdpStartHold(1, mdpHoldHalfPx);
+                else window.scrollBy({ top:  h / 2, behavior: 'smooth' });
+                return true;
+            case 'half_up':
+                if (e && e.repeat) mdpStartHold(-1, mdpHoldHalfPx);
+                else window.scrollBy({ top: -h / 2, behavior: 'smooth' });
+                return true;
+            case 'full_down':
+                if (e && e.repeat) mdpStartHold(1, mdpHoldFullPx);
+                else window.scrollBy({ top:  h, behavior: 'smooth' });
+                return true;
+            case 'full_up':
+                if (e && e.repeat) mdpStartHold(-1, mdpHoldFullPx);
+                else window.scrollBy({ top: -h, behavior: 'smooth' });
+                return true;
+            case 'top':    window.scrollTo({ top: 0, behavior: 'smooth' }); return true;
+            case 'bottom': window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' }); return true;
+            case 'history_back':    if (typeof mdpGoBack === 'function') { mdpGoBack(); return true; } return false;
+            case 'history_forward': if (typeof mdpGoForward === 'function') { mdpGoForward(); return true; } return false;
+            case 'zoom_in':    mdpApplyZoom(mdpReadZoom() + ZOOM_STEP); return true;
+            case 'zoom_out':   mdpApplyZoom(mdpReadZoom() - ZOOM_STEP); return true;
+            case 'zoom_reset': mdpApplyZoom(1); return true;
+            case 'close':      window.close(); return true;
+            case 'toc_open':   if (typeof mdpToggleToc === 'function') { mdpToggleToc(); return true; } return false;
+            case 'reload':     if (STATIC_RELOAD) { location.reload(); return true; } return false;
+        }
+        return false;
+    }
+    document.addEventListener('keydown', (e) => {
+        if (e.ctrlKey || e.metaKey || e.altKey) { clearPending(); return; }
+        if (isEditable(e.target)) { clearPending(); return; }
+
+        // Sequence completion: a pending prefix is in flight. Sequences
+        // fire even when an overlay is open so toc_open (and friends)
+        // can toggle from inside.
+        if (pendingPrefix) {
+            const seq = pendingPrefix + e.key;
+            if (SEQ_MAP[seq]) {
+                e.preventDefault();
+                const action = SEQ_MAP[seq];
+                clearPending();
+                dispatchSingle(action, e);
+                return;
+            }
+            const prefAction = actionForKey(pendingPrefix);
+            clearPending();
+            if (prefAction && !overlayBlock()) dispatchSingle(prefAction, null);
+            // Fall through so the new key gets a fresh dispatch.
+        }
+
+        if (overlayBlock()) {
+            // Still allow starting a sequence (so a fresh gO from inside
+            // an overlay can toggle it shut), but never run single-key
+            // actions when an overlay owns the keys.
+            if (SEQ_PREFIXES.has(e.key)) {
+                pendingPrefix = e.key;
+                pendingTimer = setTimeout(clearPending, SEQ_TIMEOUT_MS);
+                e.preventDefault();
+            }
             return;
         }
-        e.preventDefault();
+
+        if (SEQ_PREFIXES.has(e.key)) {
+            const k = e.key;
+            pendingPrefix = k;
+            pendingTimer = setTimeout(() => {
+                pendingPrefix = null;
+                pendingTimer = null;
+                const action = actionForKey(k);
+                if (action && !overlayBlock()) dispatchSingle(action, null);
+            }, SEQ_TIMEOUT_MS);
+            e.preventDefault();
+            return;
+        }
+
+        const action = actionForKey(e.key);
+        if (action && dispatchSingle(action, e)) e.preventDefault();
     });
     document.addEventListener('keyup', (e) => {
         if (isKey(e, 'half_down') || isKey(e, 'half_up') || isKey(e, 'full_down') || isKey(e, 'full_up')) mdpStopHold();
@@ -144,6 +220,7 @@ func defaultKeyBindings(colemak bool) KeyBindings {
 		"history_forward":     forward,
 		"close":               "q",
 		"reload":              "r",
+		"toc_open":            "gO",
 		"tree_toggle":         "Tab",
 		"tree_down":           down,
 		"tree_up":             up,
@@ -206,11 +283,11 @@ func keysJSON(keys KeyBindings) string {
 
 func vimKeys(keys KeyBindings, staticReload bool) string {
 	s := strings.ReplaceAll(vimKeysScriptTemplate, "__KEYS_JSON__", keysJSON(keys))
-	reloadCondition := "false"
+	reloadStatic := "false"
 	if staticReload {
-		reloadCondition = "isKey(e, 'reload')"
+		reloadStatic = "true"
 	}
-	s = strings.ReplaceAll(s, "__RELOAD_CONDITION__", reloadCondition)
+	s = strings.ReplaceAll(s, "__RELOAD_STATIC__", reloadStatic)
 	return s
 }
 
@@ -491,6 +568,7 @@ __EXTRA_CSS__
 <button id="mdp-fwd" class="mdp-nav-btn" aria-label="Forward" title="Forward" hidden>&#8250;</button>
 </div>
 __TREE_DOM__
+__TOC_DOM__
 __FINDER_DOM__
 __SEARCH_DOM__
 <div id="content" class="markdown-body">
@@ -686,6 +764,7 @@ window.__mdpMark && window.__mdpMark('after mermaid init');
 __VIM_KEYS__
 __SHARED_NAV_SCRIPT__
 __TREE_SCRIPT__
+__TOC_SCRIPT__
 __FINDER_SCRIPT__
 __SEARCH_SCRIPT__
 __VISUAL_SELECT_SCRIPT__
@@ -785,6 +864,11 @@ func BuildPage(opts PageOptions) string {
 	}
 
 	treeDOM, treeScript, finderDOM, finderScript, sharedNavScript := "", "", "", "", ""
+	tocDOM := `<div id="mdp-toc" hidden>` +
+		`<div class="mdp-toc-header"><span>Contents</span>` +
+		`<button class="mdp-toc-close" aria-label="Close" title="Close">&times;</button>` +
+		`</div><div class="mdp-toc-body"></div></div>`
+	tocScript := buildTocScript(keys)
 	searchDOM := `<div id="mdp-search" hidden>` +
 		`<input id="mdp-search-input" type="text" autocomplete="off" spellcheck="false" placeholder="Find in page" aria-label="Find in page">` +
 		`<span id="mdp-search-count" aria-live="polite"></span></div>`
@@ -830,10 +914,12 @@ func BuildPage(opts PageOptions) string {
 		"__MERMAID_INIT__", mermaidInit,
 		"__VIM_KEYS__", vimKeys(keys, wsPort == 0),
 		"__TREE_DOM__", treeDOM,
+		"__TOC_DOM__", tocDOM,
 		"__FINDER_DOM__", finderDOM,
 		"__SEARCH_DOM__", searchDOM,
 		"__SHARED_NAV_SCRIPT__", sharedNavScript,
 		"__TREE_SCRIPT__", treeScript,
+		"__TOC_SCRIPT__", tocScript,
 		"__FINDER_SCRIPT__", finderScript,
 		"__SEARCH_SCRIPT__", searchScript,
 		"__VISUAL_SELECT_SCRIPT__", selectScript,

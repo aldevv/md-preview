@@ -12,7 +12,7 @@ func TestBuildPage_DarkTheme(t *testing.T) {
 		"pre code.hljs",
 		"background:#0d1117",
 		"var hljs=function()",
-		"isKey(e, 'down')",
+		"case 'down':",
 	}
 	for _, want := range wants {
 		if !strings.Contains(page, want) {
@@ -93,13 +93,13 @@ func TestBuildPage_ExtraCSS(t *testing.T) {
 func TestBuildPage_VimKeys(t *testing.T) {
 	t.Run("noWS", func(t *testing.T) {
 		page := BuildPage(PageOptions{Body: "<p>x</p>", Theme: "dark"})
-		if !strings.Contains(page, "isKey(e, 'down')") || !strings.Contains(page, `"down":"j"`) {
+		if !strings.Contains(page, "case 'down':") || !strings.Contains(page, `"down":"j"`) {
 			t.Errorf("vim-keys script missing when wsPort=0")
 		}
 	})
 	t.Run("withWS", func(t *testing.T) {
 		page := BuildPage(PageOptions{Body: "<p>x</p>", Theme: "dark", WSPort: 8765})
-		if !strings.Contains(page, "isKey(e, 'down')") || !strings.Contains(page, `"down":"j"`) {
+		if !strings.Contains(page, "case 'down':") || !strings.Contains(page, `"down":"j"`) {
 			t.Errorf("vim-keys script missing when wsPort>0")
 		}
 	})
@@ -115,17 +115,16 @@ func TestBuildPage_QuitKey(t *testing.T) {
 }
 
 func TestBuildPage_ReloadKey(t *testing.T) {
-	want := "else if (isKey(e, 'reload'))"
 	t.Run("static", func(t *testing.T) {
 		page := BuildPage(PageOptions{Body: "<p>x</p>", Theme: "dark"})
-		if !strings.Contains(page, want) {
-			t.Errorf("static page missing r→reload binding")
+		if !strings.Contains(page, "STATIC_RELOAD = true") {
+			t.Errorf("static page should gate reload on STATIC_RELOAD=true")
 		}
 	})
 	t.Run("withWS", func(t *testing.T) {
 		page := BuildPage(PageOptions{Body: "<p>x</p>", Theme: "dark", WSPort: 8765})
-		if strings.Contains(page, want) {
-			t.Errorf("WS-backed page should not bind r→reload (watch/serve drive their own refresh)")
+		if !strings.Contains(page, "STATIC_RELOAD = false") {
+			t.Errorf("WS-backed page should gate reload off via STATIC_RELOAD=false")
 		}
 	})
 }
@@ -149,7 +148,7 @@ func TestBuildPage_FileTreeDisabled(t *testing.T) {
 	page := BuildPage(PageOptions{Body: "<p>x</p>", Theme: "dark"})
 	bad := []string{
 		`id="mdp-tree"`,
-		"mdpToggleTree",
+		"async function mdpToggleTree",
 		"mdpEnsureTreeData",
 		"window.mdpStaticTree =",
 	}
