@@ -136,11 +136,11 @@ function mdpTreeToggleFolder(summary, wantOpen) {
   return true;
 }
 
-function mdpTreeOpenActive() {
+function mdpTreeOpenActive(keepOpen) {
   const current = document.querySelector('#mdp-tree .active');
   if (!current) return;
   if (current.dataset.mdpTreeKind === 'file') {
-    mdpTreeNavigate(current.dataset.mdpTreePath);
+    mdpTreeNavigate(current.dataset.mdpTreePath, keepOpen ? {keepOpen: true} : undefined);
     return;
   }
   mdpTreeToggleFolder(current);
@@ -178,6 +178,10 @@ window.mdpToggleTree = mdpToggleTree;
 (function () {
   const closeBtn = document.querySelector('#mdp-tree .mdp-tree-close');
   if (closeBtn) closeBtn.addEventListener('click', () => mdpToggleTree(false));
+  if (sessionStorage.getItem('mdpTreeAutoOpen') === '1') {
+    sessionStorage.removeItem('mdpTreeAutoOpen');
+    setTimeout(() => { if (typeof mdpToggleTree === 'function') mdpToggleTree(true); }, 0);
+  }
 })();
 
 document.addEventListener('keydown', (e) => {
@@ -188,7 +192,8 @@ document.addEventListener('keydown', (e) => {
   if (window.mdpSelectIsActive) return;
   if (e.key === __TREE_TOGGLE__ && !e.shiftKey) {
     e.preventDefault();
-    mdpToggleTree();
+    if (mdpTreeIsOpen) mdpTreeOpenActive(true);
+    else mdpToggleTree(true);
     return;
   }
   if (e.key === 'Escape' && mdpTreeIsOpen) {
@@ -197,6 +202,11 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (!mdpTreeIsOpen) return;
+  if (e.key === __TREE_CLOSE__) {
+    e.preventDefault();
+    mdpToggleTree(false);
+    return;
+  }
   const isDown = e.key === 'ArrowDown' || e.key === __TREE_DOWN__;
   const isUp = e.key === 'ArrowUp' || e.key === __TREE_UP__;
   const isLeft = e.key === 'ArrowLeft' || e.key === __TREE_LEFT__;
@@ -235,6 +245,7 @@ func buildTreeScript(keys KeyBindings) string {
 	s = strings.ReplaceAll(s, "__TREE_LEFT__", jsString(keys["tree_left"]))
 	s = strings.ReplaceAll(s, "__TREE_RIGHT__", jsString(keys["tree_right"]))
 	s = strings.ReplaceAll(s, "__TREE_OPEN__", jsString(keys["tree_open"]))
+	s = strings.ReplaceAll(s, "__TREE_CLOSE__", jsString(keys["close"]))
 	return s
 }
 

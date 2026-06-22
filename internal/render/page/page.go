@@ -245,13 +245,17 @@ function mdpCurrentRel(data) {
   return window.mdpCurrentFile.slice(root.length + 1);
 }
 
-function mdpTreeNavigate(rel) {
+// keepOpen=true skips the tree close in WS mode and sets a sessionStorage
+// flag so the next static-mode page reopens the tree on load.
+function mdpTreeNavigate(rel, opts) {
   const data = mdpTreeData;
   if (!data) return;
+  const keepOpen = !!(opts && opts.keepOpen);
   const target = data.root + '/' + rel;
   if (data.rendered) {
     const tmp = data.rendered[rel];
     if (!tmp) { mdpShowToast('not pre-rendered: ' + rel); return; }
+    if (keepOpen) sessionStorage.setItem('mdpTreeAutoOpen', '1');
     window.location.href = tmp;
     return;
   }
@@ -263,7 +267,7 @@ function mdpTreeNavigate(rel) {
     if (r.ok) {
       history.pushState({mdpFile: target}, '', '');
       mdpNavigatedTo(target);
-      if (typeof mdpToggleTree === 'function') mdpToggleTree(false);
+      if (!keepOpen && typeof mdpToggleTree === 'function') mdpToggleTree(false);
       return;
     }
     let msg = 'navigation failed (' + r.status + ')';
