@@ -133,7 +133,10 @@ const vimKeysScriptTemplate = `
             case 'zoom_reset': mdpApplyZoom(1); return true;
             case 'close':      window.close(); return true;
             case 'toc_open':   if (typeof mdpToggleToc === 'function') { mdpToggleToc(); return true; } return false;
-            case 'reload':     if (STATIC_RELOAD) { location.reload(); return true; } return false;
+            case 'reload':
+                if (STATIC_RELOAD) { location.reload(); return true; }
+                fetch('/render', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'}).catch(() => {});
+                return true;
         }
         return false;
     }
@@ -414,6 +417,7 @@ ws.onmessage = (e) => {
                 doc.querySelector('#content').innerHTML;
             if (typeof hljs !== 'undefined') hljs.highlightAll();
             mdpRenderMath();
+            if (typeof mdpAttachCopyButtons === 'function') mdpAttachCopyButtons();
             cacheEls();
             if (typeof window.mdpSearchClear === 'function') window.mdpSearchClear();
         });
@@ -761,6 +765,41 @@ window.__mdpMark && window.__mdpMark('after katex render');
 __MERMAID_SCRIPT__
 __MERMAID_INIT__
 window.__mdpMark && window.__mdpMark('after mermaid init');
+const mdpCopyIconSVG = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+const mdpCheckIconSVG = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+function mdpAttachCopyButtons() {
+  document.querySelectorAll('#content pre > code').forEach((code) => {
+    const pre = code.parentElement;
+    if (pre.querySelector('.mdp-copy-btn')) return;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'mdp-copy-btn';
+    btn.setAttribute('aria-label', 'Copy code');
+    btn.title = 'Copy';
+    btn.innerHTML = mdpCopyIconSVG;
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const text = code.innerText;
+      navigator.clipboard.writeText(text).then(() => {
+        btn.innerHTML = mdpCheckIconSVG;
+        btn.classList.add('mdp-copy-done');
+        btn.title = 'Copied';
+        clearTimeout(btn._mdpTimer);
+        btn._mdpTimer = setTimeout(() => {
+          btn.innerHTML = mdpCopyIconSVG;
+          btn.classList.remove('mdp-copy-done');
+          btn.title = 'Copy';
+        }, 1500);
+      }).catch(() => {
+        btn.title = 'Copy failed';
+      });
+    });
+    pre.appendChild(btn);
+  });
+}
+window.mdpAttachCopyButtons = mdpAttachCopyButtons;
+mdpAttachCopyButtons();
 __VIM_KEYS__
 __SHARED_NAV_SCRIPT__
 __TREE_SCRIPT__

@@ -31,12 +31,44 @@ body {
   overflow: auto;
   padding: 16px;
   margin-bottom: 1em;
+  position: relative;
 }
 .markdown-body pre code {
   background: none;
   padding: 0;
   font-size: 100%;
   white-space: pre;
+}
+.mdp-copy-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-bg-code);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease-out, color 0.15s ease-out;
+}
+.mdp-copy-btn:hover { color: var(--color-text-primary); }
+.markdown-body pre:hover .mdp-copy-btn,
+.mdp-copy-btn:focus-visible {
+  opacity: 1;
+}
+.mdp-copy-btn:focus-visible {
+  outline: 2px solid var(--color-link);
+  outline-offset: 2px;
+}
+.mdp-copy-btn.mdp-copy-done {
+  color: var(--color-link);
+  border-color: var(--color-link);
 }
 .markdown-body blockquote {
   border-left: 4px solid var(--color-border);
