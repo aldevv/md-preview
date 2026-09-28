@@ -17,13 +17,13 @@ import (
 // directly.
 
 const (
-	nsApplicationActivationPolicyAccessory = 1
-	nsBackingStoreBuffered                 = 2
-	nsWindowStyleMaskTitled                = 1 << 0
-	nsWindowStyleMaskClosable              = 1 << 1
-	nsWindowStyleMaskMiniaturizable        = 1 << 2
-	nsWindowStyleMaskResizable             = 1 << 3
-	nsEventTypeApplicationDefined          = 15
+	nsApplicationActivationPolicyRegular = 0
+	nsBackingStoreBuffered               = 2
+	nsWindowStyleMaskTitled              = 1 << 0
+	nsWindowStyleMaskClosable            = 1 << 1
+	nsWindowStyleMaskMiniaturizable      = 1 << 2
+	nsWindowStyleMaskResizable           = 1 << 3
+	nsEventTypeApplicationDefined        = 15
 )
 
 type nsPoint struct{ X, Y float64 }
@@ -75,9 +75,10 @@ func Open(opts Options) error {
 	defer pool.Send(objc.RegisterName("drain"))
 
 	nsApp := objc.ID(objc.GetClass("NSApplication")).Send(objc.RegisterName("sharedApplication"))
-	// Accessory: window can take focus but mdp doesn't appear in the Dock
-	// or the menu bar. Right shape for a CLI markdown previewer.
-	nsApp.Send(objc.RegisterName("setActivationPolicy:"), nsApplicationActivationPolicyAccessory)
+	nsApp.Send(objc.RegisterName("setActivationPolicy:"), nsApplicationActivationPolicyRegular)
+	if icon := buildDockIcon(); icon != 0 {
+		nsApp.Send(objc.RegisterName("setApplicationIconImage:"), icon)
+	}
 
 	mask := nsWindowStyleMaskTitled | nsWindowStyleMaskClosable | nsWindowStyleMaskMiniaturizable | nsWindowStyleMaskResizable
 	frame := nsRect{Size: nsSize{W: float64(opts.widthOrDefault()), H: float64(opts.heightOrDefault())}}
