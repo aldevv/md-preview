@@ -76,7 +76,11 @@ const selectScriptTemplate = `
   }
 
   function key(action) { return KEYS[action] || ''; }
-  function isKey(e, action) { return key(action) && e.key === key(action); }
+  function isKey(e, action) {
+    const k = key(action);
+    if (k.length > 1 && k.includes('+')) return mdpMatchesKeySpec(e, k);
+    return k && !e.ctrlKey && !e.metaKey && !e.altKey && e.key === k;
+  }
   function isEditable(el) {
     if (!el) return false;
     const tag = el.tagName;
@@ -569,43 +573,6 @@ const selectScriptTemplate = `
     state.askAnchorRect = null;
     mdpAskShowInputUI();
   }
-  function mdpPickVisibleSearchHit() {
-    const all = document.querySelectorAll('#content .mdp-search-hit');
-    if (!all.length) return null;
-    const vh = window.innerHeight;
-    const center = vh / 2;
-    let best = null, bestDist = Infinity;
-    for (const el of all) {
-      const r = el.getBoundingClientRect();
-      if (r.bottom < 0 || r.top > vh) continue;
-      const mid = (r.top + r.bottom) / 2;
-      const d = Math.abs(mid - center);
-      if (d < bestDist) { bestDist = d; best = el; }
-    }
-    if (best) return best;
-    return document.querySelector('#content .mdp-search-hit.current') || all[0];
-  }
-  function mdpAskOpenFromSearchHit() {
-    if (!ASK_ENABLED) return false;
-    const term = (window.mdpSearchCurrentTerm || '').trim();
-    if (!term) return false;
-    const hit = mdpPickVisibleSearchHit();
-    if (!hit) return false;
-    document.querySelectorAll('#content .mdp-search-hit.current').forEach((m) => m.classList.remove('current'));
-    hit.classList.add('current');
-    try {
-      const range = document.createRange();
-      range.selectNodeContents(hit);
-      const sel = window.getSelection();
-      if (sel) { sel.removeAllRanges(); sel.addRange(range); }
-      state.askSelectionText = term;
-      state.askAnchorRect = range.getBoundingClientRect();
-      mdpAskShowInputUI();
-      return true;
-    } catch (_) {
-      return false;
-    }
-  }
   function mdpAskOpenInput() {
     if (!ASK_ENABLED || state.mode !== 'visual') return;
     const snap = mdpAskSnapshotSelection();
@@ -954,31 +921,6 @@ const selectScriptTemplate = `
           mdpAskCloseAll();
           state.askHistoryIdx = -1;
           return;
-        }
-        // A live mouse selection wins over the search-hit / whole-file
-        // fallback so the user can highlight then press c to ask about
-        // just that snippet.
-        if (ASK_ENABLED && isKey(e, 'select_ask')) {
-          const snap = mdpAskSnapshotSelection();
-          if (snap) {
-            e.preventDefault();
-            if (mdpAskServerReachable()) {
-              state.askSelectionText = snap.text;
-              state.askAnchorRect = snap.rect;
-              mdpAskShowInputUI();
-            } else if (mdpAskSidecarURL()) {
-              mdpAskPromoteViaSidecar(snap.text);
-            }
-            return;
-          }
-          if (mdpAskServerReachable()) {
-            e.preventDefault();
-            if (!mdpAskOpenFromSearchHit()) mdpAskOpenWholeFile();
-          } else if (mdpAskSidecarURL()) {
-            e.preventDefault();
-            const term = (window.mdpSearchCurrentTerm || '').trim();
-            mdpAskPromoteViaSidecar(term || undefined);
-          }
         }
         return;
       }

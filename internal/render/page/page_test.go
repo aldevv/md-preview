@@ -415,7 +415,7 @@ func TestBuildPage_AskGateOff(t *testing.T) {
 
 func TestBuildPage_AskEnabled(t *testing.T) {
 	page := BuildPage(PageOptions{Body: "<p>x</p>", Theme: "dark", Hop: true, Visual: true, Ask: true})
-	for _, want := range []string{"ASK_ENABLED = true", "mdpAskOpenInput", "mdpAskSubmit", `"select_ask":"c"`} {
+	for _, want := range []string{"ASK_ENABLED = true", "mdpAskOpenInput", "mdpAskSubmit", `"select_ask":"a"`} {
 		if !strings.Contains(page, want) {
 			t.Errorf("ask-enabled page missing %q", want)
 		}

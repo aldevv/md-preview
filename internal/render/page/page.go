@@ -248,7 +248,7 @@ func defaultKeyBindings(colemak bool) KeyBindings {
 		"select_bottom":       "G",
 		"select_yank":         "y",
 		"select_toggle_lines": "L",
-		"select_ask":          "c",
+		"select_ask":          "a",
 		"ask_again":           "a",
 		"zoom_in":             "+",
 		"zoom_out":            "-",

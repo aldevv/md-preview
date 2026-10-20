@@ -101,7 +101,7 @@ const defaultConfigTemplate = `# md-preview config: uncomment any line to overri
 # zoom_out = "-"
 # zoom_reset = "0"
 
-# ask              = true        # 'c' in visual mode (and the top-right star) sends the selection + a prompt to claude -p
+# ask              = true        # 'a' in visual mode (and the top-right star) sends the selection + a prompt to claude -p
 # ask_command      = "claude -p" # command to spawn; receives the constructed prompt on stdin
 # ask_timeout_sec  = 60          # hard cap on the spawned process (1-600)
 # ask_system_prompt = ""         # extra instructions prepended to every ask body (persona, tone, etc.)
